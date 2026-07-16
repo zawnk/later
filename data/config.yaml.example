@@ -1,0 +1,22 @@
+server:
+  port: 8080
+  base_url: https://later.domain.com # used as the callback url on notification action buttons https://docs.ntfy.sh/publish/#send-http-request
+  data_dir: ./data # path for the reminder data files
+
+ntfy:
+  server: https://ntfy.domain.com # used as the server for your ntfy
+  token: tk_XXXXX # your ntfy token with the appropriate permissions, for example later*:rw
+  default_outbound: later-reminders-user # the default topic that is used when none is given in the request
+
+inbound:
+  - topic: later-input-user # topic that later listens to for reminders
+    outbound:
+      - later-reminders-user # topic that then gets the reminders that were set in the inbound topic
+
+auth_tokens:
+  - token: tk_YYYYY # a token that is used to verify http requests, use the `ntfy token generate` command to generate
+    outbound:
+      - later-reminders-user # outbound topics that this token is allowed to set reminders for
+
+timezone: Europe/Berlin # your timezone
+late_prefix: "DELAYED: " # gets prepended to messages that get sent after a downtime of later

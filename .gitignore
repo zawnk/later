@@ -29,4 +29,9 @@ go.work.sum
 
 # Editor/IDE
 # .idea/
-# .vscode/
+.vscode/
+
+# app-specific
+config.yaml
+later
+*.json

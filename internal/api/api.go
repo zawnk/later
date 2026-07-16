@@ -1,0 +1,180 @@
+package api
+
+import (
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"strings"
+
+	"github.com/zawnk/later/internal/config"
+	"github.com/zawnk/later/internal/service"
+)
+
+type API struct {
+	cfg *config.Config
+	svc *service.Service
+}
+
+func New(cfg *config.Config, svc *service.Service) *API {
+	return &API{cfg: cfg, svc: svc}
+}
+
+func (a *API) Routes() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /reminders", a.auth(a.createReminder))
+	mux.HandleFunc("GET /reminders", a.auth(a.listPending))
+	mux.HandleFunc("GET /reminders/archive", a.auth(a.listArchive))
+	mux.HandleFunc("GET /reminders/next", a.auth(a.nextReminder))
+	mux.HandleFunc("GET /reminders/last", a.auth(a.lastReminder))
+	mux.HandleFunc("DELETE /reminders/{id}", a.auth(a.cancelReminder))
+	mux.HandleFunc("POST /reminders/{id}/postpone", a.auth(a.postponeReminder))
+	mux.HandleFunc("GET /health", a.health)
+	return mux
+}
+
+func (a *API) auth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		for _, t := range a.cfg.AuthTokens {
+			if t.Token == token {
+				// find allowed outbound topics for this token
+				r = r.WithContext(contextWithToken(r.Context(), t))
+				next(w, r)
+				return
+			}
+		}
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}
+}
+
+func (a *API) health(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+}
+
+func (a *API) createReminder(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Text           string   `json:"text"`
+		OutboundTopics []string `json:"outbound_topics"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if body.Text == "" {
+		http.Error(w, "text is required", http.StatusBadRequest)
+		return
+	}
+
+	// resolve outbound topics
+	token := tokenFromContext(r.Context())
+	outbound := body.OutboundTopics
+	if len(outbound) == 0 {
+		outbound = token.Outbound
+	} else {
+		// validate requested topics are allowed for this token
+		outbound = filterAllowed(outbound, token.Outbound)
+		if len(outbound) == 0 {
+			http.Error(w, "no allowed outbound topics", http.StatusForbidden)
+			return
+		}
+	}
+
+	rem, err := a.svc.CreateReminder(body.Text, outbound)
+	if err != nil {
+		slog.Error("failed to create reminder", "err", err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(rem)
+}
+
+func (a *API) listPending(w http.ResponseWriter, r *http.Request) {
+	reminders := a.svc.ListPending()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(reminders)
+}
+
+func (a *API) listArchive(w http.ResponseWriter, r *http.Request) {
+	reminders, err := a.svc.ListArchive()
+	if err != nil {
+		http.Error(w, "failed to load archive", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(reminders)
+}
+
+func (a *API) nextReminder(w http.ResponseWriter, r *http.Request) {
+	rem := a.svc.Next()
+	if rem == nil {
+		http.Error(w, "no pending reminders", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(rem)
+}
+
+func (a *API) lastReminder(w http.ResponseWriter, r *http.Request) {
+	rem, err := a.svc.Last()
+	if err != nil {
+		http.Error(w, "failed to load archive", http.StatusInternalServerError)
+		return
+	}
+	if rem == nil {
+		http.Error(w, "no archived reminders", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(rem)
+}
+
+func (a *API) cancelReminder(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	found, err := a.svc.Cancel(id)
+	if err != nil {
+		http.Error(w, "failed to cancel reminder", http.StatusInternalServerError)
+		return
+	}
+	if !found {
+		http.Error(w, "reminder not found", http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *API) postponeReminder(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	duration := r.URL.Query().Get("duration")
+	if duration == "" {
+		http.Error(w, "duration is required", http.StatusBadRequest)
+		return
+	}
+
+	rem, err := a.svc.Postpone(id, duration)
+	if err != nil {
+		slog.Error("failed to postpone reminder", "err", err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(rem)
+}
+
+func filterAllowed(requested, allowed []string) []string {
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, t := range allowed {
+		allowedSet[t] = struct{}{}
+	}
+	var result []string
+	for _, t := range requested {
+		if _, ok := allowedSet[t]; ok {
+			result = append(result, t)
+		}
+	}
+	return result
+}
