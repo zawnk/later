@@ -1,11 +1,13 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/olebedev/when"
 	"github.com/olebedev/when/rules/common"
@@ -13,6 +15,8 @@ import (
 	"github.com/zawnk/later/internal/reminder"
 	"github.com/zawnk/later/internal/store"
 )
+
+const maxReminderTextLength = 4096
 
 var durationRegex = regexp.MustCompile(`(\d+)(y|mo|w|d|h|m|s)`)
 
@@ -43,6 +47,15 @@ func New(s *store.Store) *Service {
 }
 
 func (s *Service) CreateReminder(text string, outboundTopics []string) (*reminder.Reminder, error) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil, errors.New("empty reminder text")
+	}
+
+	if utf8.RuneCountInString(text) > maxReminderTextLength {
+		return nil, fmt.Errorf("reminder text too long (max %d chars)", maxReminderTextLength)
+	}
+
 	text = preprocessDuration(text)
 
 	result, err := s.parser.Parse(text, time.Now())
