@@ -13,10 +13,16 @@ import (
 	"github.com/olebedev/when/rules/common"
 	"github.com/olebedev/when/rules/en"
 	"github.com/zawnk/later/internal/reminder"
-	"github.com/zawnk/later/internal/store"
 )
 
 const maxReminderTextLength = 4096
+
+type Store interface {
+	SaveReminder(r reminder.Reminder) error
+	ListPendingReminders() []reminder.Reminder
+	ListArchive() ([]reminder.ArchivedReminder, error)
+	CancelReminder(id string) (bool, error)
+}
 
 var durationRegex = regexp.MustCompile(`(\d+)(y|mo|w|d|h|m|s)`)
 
@@ -31,11 +37,12 @@ var durationWords = map[string]string{
 }
 
 type Service struct {
-	store  *store.Store
+	store  Store
 	parser *when.Parser
+	now    func() time.Time
 }
 
-func New(s *store.Store) *Service {
+func New(s Store) *Service {
 	w := when.New(nil)
 	w.Add(en.All...)
 	w.Add(common.All...)
@@ -43,6 +50,7 @@ func New(s *store.Store) *Service {
 	return &Service{
 		store:  s,
 		parser: w,
+		now:    time.Now,
 	}
 }
 
@@ -58,7 +66,7 @@ func (s *Service) CreateReminder(text string, outboundTopics []string) (*reminde
 
 	text = preprocessDuration(text)
 
-	result, err := s.parser.Parse(text, time.Now())
+	result, err := s.parser.Parse(text, s.now())
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse time: %w", err)
 	}
@@ -67,7 +75,7 @@ func (s *Service) CreateReminder(text string, outboundTopics []string) (*reminde
 	}
 
 	task := strings.TrimSpace(strings.Replace(text, result.Text, "", 1))
-	task = strings.TrimPrefix(task, "at")
+	task = strings.TrimPrefix(task, " at ")
 	task = strings.TrimSpace(task)
 	if task == "" {
 		return nil, fmt.Errorf("no task text found")
@@ -78,7 +86,7 @@ func (s *Service) CreateReminder(text string, outboundTopics []string) (*reminde
 		ID:             reminder.GenerateID(),
 		Text:           task,
 		DueAt:          result.Time.Local().Round(time.Minute),
-		CreatedAt:      time.Now(),
+		CreatedAt:      s.now(),
 		OutboundTopics: outboundTopics,
 	}
 
@@ -92,17 +100,15 @@ func (s *Service) CreateReminder(text string, outboundTopics []string) (*reminde
 // preprocessDuration converts compact duration strings to forms when can parse
 // e.g. "3d" -> "3 days", "2h30m" -> "2 hours 30 minutes"
 func preprocessDuration(s string) string {
-	return durationRegex.ReplaceAllStringFunc(s, func(match string) string {
+	res := durationRegex.ReplaceAllStringFunc(s, func(match string) string {
 		parts := durationRegex.FindStringSubmatch(match)
-		if len(parts) != 3 {
-			return match
-		}
-		word, ok := durationWords[parts[2]]
-		if !ok {
-			return match
-		}
-		return parts[1] + " " + word
+
+		word := durationWords[parts[2]]
+
+		return fmt.Sprintf(" %s %s ", parts[1], word)
 	})
+
+	return strings.ReplaceAll(strings.TrimSpace(res), "  ", " ")
 }
 
 func (s *Service) ListPending() []reminder.Reminder {
@@ -168,7 +174,7 @@ func (s *Service) Postpone(id string, duration string) (*reminder.Reminder, erro
 		return nil, fmt.Errorf("reminder %s not found in archive", id)
 	}
 
-	due, err := applyDuration(duration, time.Now())
+	due, err := applyDuration(duration, s.now())
 	if err != nil {
 		return nil, fmt.Errorf("invalid duration: %w", err)
 	}
@@ -177,7 +183,7 @@ func (s *Service) Postpone(id string, duration string) (*reminder.Reminder, erro
 		ID:             reminder.GenerateID(),
 		Text:           found.Text,
 		DueAt:          due.Round(time.Minute),
-		CreatedAt:      time.Now(),
+		CreatedAt:      s.now(),
 		OutboundTopics: found.OutboundTopics,
 	}
 

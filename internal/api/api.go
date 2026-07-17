@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/zawnk/later/internal/config"
@@ -187,5 +188,6 @@ func filterAllowed(requested, allowed []string) []string {
 			result = append(result, t)
 		}
 	}
-	return result
+	slices.Sort(result)
+	return slices.Compact((result))
 }
