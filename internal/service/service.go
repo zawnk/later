@@ -204,27 +204,30 @@ func applyDuration(duration string, from time.Time) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("invalid duration: %s", duration)
 	}
 
-	result := from
+	var years, months, days int
+	var clock time.Duration
+
 	for _, match := range matches {
 		n, _ := strconv.Atoi(match[1])
 		switch match[2] {
-		case "s":
-			result = result.Add(time.Duration(n) * time.Second)
-		case "m":
-			result = result.Add(time.Duration(n) * time.Minute)
-		case "h":
-			result = result.Add(time.Duration(n) * time.Hour)
-		case "d":
-			result = result.AddDate(0, 0, n)
-		case "w":
-			result = result.AddDate(0, 0, n*7)
-		case "mo":
-			result = result.AddDate(0, n, 0)
 		case "y":
-			result = result.AddDate(n, 0, 0)
+			years += n
+		case "mo":
+			months += n
+		case "w":
+			days += n * 7
+		case "d":
+			days += n
+		case "h":
+			clock += time.Duration(n) * time.Hour
+		case "m":
+			clock += time.Duration(n) * time.Minute
+		case "s":
+			clock += time.Duration(n) * time.Second
+
 		default:
 			return time.Time{}, fmt.Errorf("unknown unit: %s", match[2])
 		}
 	}
-	return result, nil
+	return from.AddDate(years, months, days).Add(clock), nil
 }
