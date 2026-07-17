@@ -14,7 +14,7 @@ inbound:
       - later-reminders-user # topic that then gets the reminders that were set in the inbound topic
 
 auth_tokens:
-  - token: tk_YYYYY # a token that is used to verify http requests, use the `ntfy token generate` command to generate
+  - token: tk_replace_this_with_a_real_token_at_least_16_chars # generate via `ntfy token generate`
     outbound:
       - later-reminders-user # outbound topics that this token is allowed to set reminders for
 

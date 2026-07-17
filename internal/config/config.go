@@ -1,10 +1,16 @@
 package config
 
 import (
+	"errors"
+	"fmt"
+	"net/url"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
+
+const minTokenLength = 16
 
 type Config struct {
 	Server     ServerConfig `yaml:"server"`
@@ -39,14 +45,78 @@ type Token struct {
 func Load(path string) (*Config, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error when opening config: %w", err)
 	}
 	defer f.Close()
 
 	var cfg Config
-	if err := yaml.NewDecoder(f).Decode(&cfg); err != nil {
-		// TODO: proper error handling
-		return nil, err
+	dec := yaml.NewDecoder(f)
+	dec.KnownFields(true)
+	if err := dec.Decode(&cfg); err != nil {
+		return nil, fmt.Errorf("error parsing config %s: %w", path, err)
+	}
+
+	cfg.applyDefaults()
+
+	if err := cfg.validate(); err != nil {
+		return nil, fmt.Errorf("invalid config %s: %w", path, err)
 	}
 	return &cfg, nil
+}
+
+func (c *Config) applyDefaults() {
+	if c.Server.Port == 0 {
+		c.Server.Port = 8080
+	}
+	if c.Server.DataDir == "" {
+		c.Server.DataDir = "/data"
+	}
+	if c.LatePrefix == "" {
+		c.LatePrefix = "DELAYED:"
+	}
+}
+
+func (c *Config) validate() error {
+	if c.Server.Port < 1 || c.Server.Port > 65535 {
+		return fmt.Errorf("server.port: must be 1-65535, got %d", c.Server.Port)
+	}
+
+	if strings.TrimSpace(c.Ntfy.Server) == "" {
+		return errors.New("ntfy.server is required")
+	}
+	if _, err := url.Parse(c.Ntfy.Server); err != nil {
+		return fmt.Errorf("ntfy.server is not a valid URL: %w", err)
+	}
+
+	if strings.TrimSpace(c.Ntfy.Token) == "" {
+		return errors.New("ntfy.token is required")
+	}
+
+	if len(c.AuthTokens) == 0 && len(c.Inbound) == 0 {
+		return errors.New("configure at least one of auth_tokens or inbound; otherwise no way to create reminders")
+	}
+
+	seenTokens := make(map[string]int, len(c.AuthTokens))
+	for i, t := range c.AuthTokens {
+		if len(t.Token) < minTokenLength {
+			return fmt.Errorf("auth_tokens[%d].token: must be at least %d chars", i, minTokenLength)
+		}
+		if prev, dup := seenTokens[t.Token]; dup {
+			return fmt.Errorf("auth_tokens[%d].token: duplicate of auth_tokens[%d]", i, prev)
+		}
+		seenTokens[t.Token] = i
+	}
+
+	seenTopics := make(map[string]int, len(c.Inbound))
+	for i, in := range c.Inbound {
+		if strings.TrimSpace(in.Topic) == "" {
+			return fmt.Errorf("inbound[%d].topic: required", i)
+		}
+		if prev, dup := seenTopics[in.Topic]; dup {
+			return fmt.Errorf("inbound[%d].topic %q: duplicate of inbound[%d]", i, in.Topic, prev)
+		}
+		seenTopics[in.Topic] = i
+	}
+
+	return nil
 }
