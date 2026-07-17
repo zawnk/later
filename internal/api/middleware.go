@@ -19,7 +19,7 @@ func LogRequests(h http.Handler) http.Handler {
 
 		h.ServeHTTP(rec, r)
 
-		if isHealthProbe(r.URL.Path) && rec.status < 400 {
+		if r.URL.Path == "/healthz" && rec.status < 400 {
 			return
 		}
 
@@ -31,10 +31,6 @@ func LogRequests(h http.Handler) http.Handler {
 			"remote", r.RemoteAddr,
 		)
 	})
-}
-
-func isHealthProbe(path string) bool {
-	return path == "/healthz" || path == "/readyz"
 }
 
 type statusRecorder struct {
