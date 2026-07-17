@@ -173,7 +173,7 @@ func (s *Service) Postpone(id string, duration string) (*reminder.Reminder, erro
 		return nil, fmt.Errorf("reminder %s not found in archive", id)
 	}
 
-	d, err := parseDuration(duration)
+	due, err := applyDuration(duration, time.Now())
 	if err != nil {
 		return nil, fmt.Errorf("invalid duration: %w", err)
 	}
@@ -186,7 +186,7 @@ func (s *Service) Postpone(id string, duration string) (*reminder.Reminder, erro
 	rem := &reminder.Reminder{
 		ID:             newID,
 		Text:           found.Text,
-		DueAt:          time.Now().Add(d).Round(time.Minute),
+		DueAt:          due.Round(time.Minute),
 		CreatedAt:      time.Now(),
 		OutboundTopics: found.OutboundTopics,
 	}
@@ -198,33 +198,33 @@ func (s *Service) Postpone(id string, duration string) (*reminder.Reminder, erro
 	return rem, nil
 }
 
-func parseDuration(s string) (time.Duration, error) {
-	matches := durationRegex.FindAllStringSubmatch(s, -1)
+func applyDuration(duration string, from time.Time) (time.Time, error) {
+	matches := durationRegex.FindAllStringSubmatch(duration, -1)
 	if len(matches) == 0 {
-		return 0, fmt.Errorf("invalid duration: %s", s)
+		return time.Time{}, fmt.Errorf("invalid duration: %s", duration)
 	}
 
-	var total time.Duration
+	result := from
 	for _, match := range matches {
 		n, _ := strconv.Atoi(match[1])
 		switch match[2] {
 		case "s":
-			total += time.Duration(n) * time.Second
+			result = result.Add(time.Duration(n) * time.Second)
 		case "m":
-			total += time.Duration(n) * time.Minute
+			result = result.Add(time.Duration(n) * time.Minute)
 		case "h":
-			total += time.Duration(n) * time.Hour
+			result = result.Add(time.Duration(n) * time.Hour)
 		case "d":
-			total += time.Duration(n) * 24 * time.Hour
+			result = result.AddDate(0, 0, n)
 		case "w":
-			total += time.Duration(n) * 7 * 24 * time.Hour
+			result = result.AddDate(0, 0, n*7)
 		case "mo":
-			total += time.Duration(n) * 30 * 24 * time.Hour
+			result = result.AddDate(0, n, 0)
 		case "y":
-			total += time.Duration(n) * 365 * 24 * time.Hour
+			result = result.AddDate(n, 0, 0)
 		default:
-			return 0, fmt.Errorf("unknown unit: %s", match[2])
+			return time.Time{}, fmt.Errorf("unknown unit: %s", match[2])
 		}
 	}
-	return total, nil
+	return result, nil
 }
