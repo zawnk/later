@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/zawnk/later/internal/api"
@@ -32,6 +35,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	svc := service.New(s)
 	ntfyClient := ntfy.NewNtfyClient(cfg)
 
@@ -56,7 +62,7 @@ func main() {
 
 	// start scheduler
 	sched := scheduler.New(s, ntfyClient.Send)
-	go sched.Start()
+	go sched.Run(ctx)
 
 	// start API
 	a := api.New(cfg, svc)
