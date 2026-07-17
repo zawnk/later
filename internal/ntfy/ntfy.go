@@ -138,13 +138,18 @@ func (c *NtfyClient) Run(ctx context.Context, incomingMsgs chan<- SubscriptionMe
 func (c *NtfyClient) subscribe(ctx context.Context, topics string, incomingMsgs chan<- SubscriptionMessage) error {
 	url := fmt.Sprintf("%s/%s/json", strings.TrimRight(c.cfg.Ntfy.Server, "/"), topics)
 
+	var ntfyHttpClient = &http.Client{
+		Transport: &http.Transport{ResponseHeaderTimeout: 10 * time.Second},
+	}
+
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return err
 	}
+
 	req.Header.Set("Authorization", "Bearer "+c.cfg.Ntfy.Token)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := ntfyHttpClient.Do(req)
 	if err != nil {
 		return err
 	}
