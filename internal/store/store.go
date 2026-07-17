@@ -21,6 +21,10 @@ type Store struct {
 }
 
 func New(dataDir string) (*Store, error) {
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
+		return nil, fmt.Errorf("create data dir: %w", err)
+	}
+
 	s := &Store{
 		pendingPath: filepath.Join(dataDir, "pending.json"),
 		archivePath: filepath.Join(dataDir, "archive.json"),
