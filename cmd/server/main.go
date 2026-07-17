@@ -76,7 +76,7 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		go sched.Run(ctx)
+		sched.Run(ctx)
 	}()
 
 	// start API
