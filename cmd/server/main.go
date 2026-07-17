@@ -22,6 +22,10 @@ import (
 )
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	})))
+
 	configPath := flag.String("config", "/data/config.yaml", "path to config file")
 	flag.Parse()
 

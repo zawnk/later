@@ -35,15 +35,15 @@ type ntfyMessageModifications struct {
 	tags  []string
 }
 
-type NtfyClient struct {
+type Client struct {
 	cfg *config.Config
 }
 
-func New(cfg *config.Config) *NtfyClient {
-	return &NtfyClient{cfg: cfg}
+func New(cfg *config.Config) *Client {
+	return &Client{cfg: cfg}
 }
 
-func (c *NtfyClient) Send(r reminder.Reminder, late bool) error {
+func (c *Client) Send(r reminder.Reminder, late bool) error {
 	topics := r.OutboundTopics
 	if len(topics) == 0 {
 		topics = []string{c.cfg.Ntfy.DefaultOutbound}
@@ -58,7 +58,7 @@ func (c *NtfyClient) Send(r reminder.Reminder, late bool) error {
 	return nil
 }
 
-func (c *NtfyClient) sendToTopic(text, topic string, mods ...ntfyMessageModifications) error {
+func (c *Client) sendToTopic(text, topic string, mods ...ntfyMessageModifications) error {
 	var mod ntfyMessageModifications
 	if len(mods) > 0 {
 		mod = mods[0]
@@ -99,7 +99,7 @@ func (c *NtfyClient) sendToTopic(text, topic string, mods ...ntfyMessageModifica
 	return nil
 }
 
-func (c *NtfyClient) Run(ctx context.Context, incomingMsgs chan<- SubscriptionMessage) {
+func (c *Client) Run(ctx context.Context, incomingMsgs chan<- SubscriptionMessage) {
 	defer close(incomingMsgs)
 
 	if len(c.cfg.Inbound) == 0 {
@@ -135,7 +135,7 @@ func (c *NtfyClient) Run(ctx context.Context, incomingMsgs chan<- SubscriptionMe
 	}
 }
 
-func (c *NtfyClient) subscribe(ctx context.Context, topics string, incomingMsgs chan<- SubscriptionMessage) error {
+func (c *Client) subscribe(ctx context.Context, topics string, incomingMsgs chan<- SubscriptionMessage) error {
 	url := fmt.Sprintf("%s/%s/json", strings.TrimRight(c.cfg.Ntfy.Server, "/"), topics)
 
 	var ntfyHttpClient = &http.Client{
@@ -195,7 +195,7 @@ func (c *NtfyClient) subscribe(ctx context.Context, topics string, incomingMsgs 
 	return scanner.Err()
 }
 
-func (c *NtfyClient) resolveOutbound(topic string) []string {
+func (c *Client) resolveOutbound(topic string) []string {
 	for _, inbound := range c.cfg.Inbound {
 		if inbound.Topic == topic {
 			if len(inbound.Outbound) > 0 {
@@ -206,11 +206,11 @@ func (c *NtfyClient) resolveOutbound(topic string) []string {
 	return []string{c.cfg.Ntfy.DefaultOutbound}
 }
 
-func (c *NtfyClient) SendConfirmation(topic string, r *reminder.Reminder) error {
+func (c *Client) SendConfirmation(topic string, r *reminder.Reminder) error {
 	msg := fmt.Sprintf("Reminder set for %s ✅ (%s)", r.DueAt.Format("Mon Jan 2, 15:04"), r.ID)
 	return c.sendSystem(msg, topic)
 }
 
-func (c *NtfyClient) sendSystem(text, topic string) error {
+func (c *Client) sendSystem(text, topic string) error {
 	return c.sendToTopic("[later] "+text, topic)
 }
