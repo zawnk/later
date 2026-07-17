@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"context"
 	"log/slog"
 	"time"
 
@@ -22,7 +23,7 @@ func New(s *store.Store, notify func(r reminder.Reminder, late bool) error) *Sch
 	}
 }
 
-func (s *Scheduler) Start() {
+func (s *Scheduler) Run(ctx context.Context) {
 	// fire any missed reminders on startup
 	s.tick()
 
@@ -30,8 +31,13 @@ func (s *Scheduler) Start() {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		s.tick()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.tick()
+		}
 	}
 }
 
