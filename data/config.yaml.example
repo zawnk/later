@@ -18,5 +18,4 @@ auth_tokens:
     outbound:
       - later-reminders-user # outbound topics that this token is allowed to set reminders for
 
-timezone: Europe/Berlin # your timezone
 late_prefix: "DELAYED: " # gets prepended to messages that get sent after a downtime of later

@@ -11,7 +11,6 @@ type Config struct {
 	Ntfy       NtfyConfig   `yaml:"ntfy"`
 	Inbound    []Inbound    `yaml:"inbound"`
 	AuthTokens []Token      `yaml:"auth_tokens"`
-	Timezone   string       `yaml:"timezone"`
 	LatePrefix string       `yaml:"late_prefix"`
 }
 
