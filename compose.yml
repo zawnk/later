@@ -5,6 +5,7 @@ services:
     restart: unless-stopped
     environment:
       - TZ=Europe/Berlin
+      - LATER_HTTP_LOG=0
     volumes:
       - ./data:/data
     ports:

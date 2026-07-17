@@ -87,9 +87,14 @@ func main() {
 	// start API
 	a := api.New(cfg, svc)
 
+	var handler http.Handler = a.Routes()
+	if os.Getenv("LATER_HTTP_LOG") == "1" {
+		handler = api.LogRequests(handler)
+	}
+
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Server.Port),
-		Handler:           a.Routes(),
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,

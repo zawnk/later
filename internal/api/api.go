@@ -29,7 +29,8 @@ func (a *API) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /reminders/last", a.auth(a.lastReminder))
 	mux.HandleFunc("DELETE /reminders/{id}", a.auth(a.cancelReminder))
 	mux.HandleFunc("POST /reminders/{id}/postpone", a.auth(a.postponeReminder))
-	mux.HandleFunc("GET /health", a.health)
+	mux.HandleFunc("GET /healthz", a.healthz)
+
 	return mux
 }
 
@@ -38,7 +39,7 @@ func (a *API) auth(next http.HandlerFunc) http.HandlerFunc {
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		verifiedToken, authorized := a.tokenCompare(token)
 
-		if authorized == false {
+		if !authorized {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -64,8 +65,8 @@ func (a *API) tokenCompare(presented string) (config.Token, bool) {
 	return config.Token{}, false
 }
 
-func (a *API) health(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
+func (a *API) healthz(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *API) createReminder(w http.ResponseWriter, r *http.Request) {
@@ -105,15 +106,11 @@ func (a *API) createReminder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(rem)
+	writeJsonResponse(w, http.StatusCreated, rem)
 }
 
 func (a *API) listPending(w http.ResponseWriter, r *http.Request) {
-	reminders := a.svc.ListPending()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(reminders)
+	writeJsonResponse(w, http.StatusOK, a.svc.ListPending())
 }
 
 func (a *API) listArchive(w http.ResponseWriter, r *http.Request) {
@@ -122,8 +119,7 @@ func (a *API) listArchive(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to load archive", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(reminders)
+	writeJsonResponse(w, http.StatusOK, reminders)
 }
 
 func (a *API) nextReminder(w http.ResponseWriter, r *http.Request) {
@@ -132,8 +128,7 @@ func (a *API) nextReminder(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no pending reminders", http.StatusNotFound)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(rem)
+	writeJsonResponse(w, http.StatusOK, rem)
 }
 
 func (a *API) lastReminder(w http.ResponseWriter, r *http.Request) {
@@ -146,8 +141,7 @@ func (a *API) lastReminder(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no archived reminders", http.StatusNotFound)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(rem)
+	writeJsonResponse(w, http.StatusOK, rem)
 }
 
 func (a *API) cancelReminder(w http.ResponseWriter, r *http.Request) {
@@ -179,9 +173,7 @@ func (a *API) postponeReminder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(rem)
+	writeJsonResponse(w, http.StatusCreated, rem)
 }
 
 func filterAllowed(requested, allowed []string) []string {
