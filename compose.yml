@@ -1,0 +1,11 @@
+services:
+  later:
+    build: .
+    container_name: later
+    restart: unless-stopped
+    environment:
+      - TZ=Europe/Berlin
+    volumes:
+      - ./data:/data
+    ports:
+      - "8080:8080"

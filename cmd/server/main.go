@@ -11,6 +11,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	_ "time/tzdata"
 
 	"github.com/zawnk/later/internal/api"
 	"github.com/zawnk/later/internal/config"
