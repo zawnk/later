@@ -118,6 +118,8 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		slog.Error("server failed", "err", err)
 		stop()
+		wg.Wait()
+		os.Exit(1)
 	}
 
 	wg.Wait()
