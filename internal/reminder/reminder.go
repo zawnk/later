@@ -20,7 +20,7 @@ type ArchivedReminder struct {
 }
 
 func GenerateID() (string, error) {
-	b := make([]byte, 3)
+	b := make([]byte, 4)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
