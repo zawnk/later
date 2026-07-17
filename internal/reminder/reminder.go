@@ -3,6 +3,7 @@ package reminder
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"time"
 )
 
@@ -19,10 +20,10 @@ type ArchivedReminder struct {
 	FiredAt time.Time `json:"fired_at"`
 }
 
-func GenerateID() (string, error) {
+func GenerateID() string {
 	b := make([]byte, 4)
 	if _, err := rand.Read(b); err != nil {
-		return "", err
+		panic(fmt.Sprintf("crypto/rand failed: %v", err))
 	}
-	return hex.EncodeToString(b), nil
+	return hex.EncodeToString(b)
 }
