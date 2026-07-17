@@ -100,7 +100,6 @@ func (c *NtfyClient) sendToTopic(text, topic string, mods ...ntfyMessageModifica
 
 func (c *NtfyClient) Run(ctx context.Context, incomingMsgs chan<- SubscriptionMessage) {
 	defer close(incomingMsgs)
-	// ch := make(chan SubscriptionMessage)
 
 	if len(c.cfg.Inbound) == 0 {
 		slog.Info("no inbound topics configured, ntfy subscriber disabled")
