@@ -39,6 +39,7 @@ type Client struct {
 	cfg             *config.Config
 	publishClient   *http.Client
 	subscribeClient *http.Client
+	reconnectWait   time.Duration // pause between subscribe attempts; overridable so tests don't sleep for real
 }
 
 func New(cfg *config.Config) *Client {
@@ -50,6 +51,7 @@ func New(cfg *config.Config) *Client {
 		subscribeClient: &http.Client{
 			Transport: &http.Transport{ResponseHeaderTimeout: 10 * time.Second},
 		},
+		reconnectWait: 5 * time.Second,
 	}
 }
 
@@ -137,13 +139,13 @@ func (c *Client) Run(ctx context.Context, incomingMsgs chan<- SubscriptionMessag
 			return
 		}
 
-		slog.Error("ntfy subscription dropped, reconnecting in 5s", "topics", combined, "err", err)
+		slog.Error("ntfy subscription dropped, reconnecting", "backoff", c.reconnectWait, "topics", combined, "err", err)
 
 		select {
 		case <-ctx.Done():
 			slog.Info("ntfy subscriber stopped during reconnect wait")
 			return
-		case <-time.After(5 * time.Second):
+		case <-time.After(c.reconnectWait):
 		}
 	}
 }
