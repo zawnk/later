@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -39,13 +40,23 @@ func main() {
 	defer stop()
 
 	svc := service.New(s)
-	ntfyClient := ntfy.NewNtfyClient(cfg)
+	ntfyClient := ntfy.New(cfg)
 
-	// wire ntfy inbound to service
+	var wg sync.WaitGroup
+	// wire ntfy inbound subscriber
 	if len(cfg.Inbound) > 0 {
-		ch := ntfyClient.SubscribeAllWithReconnect()
+		msgs := make(chan ntfy.SubscriptionMessage, 32)
+
+		wg.Add(1)
 		go func() {
-			for msg := range ch {
+			defer wg.Done()
+			ntfyClient.Run(ctx, msgs)
+		}()
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for msg := range msgs {
 				rem, err := svc.CreateReminder(msg.Text, msg.Outbound)
 				if err != nil {
 					slog.Error("failed to create reminder from ntfy", "err", err)
@@ -62,23 +73,41 @@ func main() {
 
 	// start scheduler
 	sched := scheduler.New(s, ntfyClient.Send)
-	go sched.Run(ctx)
+	go func() {
+		defer wg.Done()
+		go sched.Run(ctx)
+	}()
 
 	// start API
 	a := api.New(cfg, svc)
-	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 
 	srv := &http.Server{
-		Addr:              addr,
+		Addr:              fmt.Sprintf(":%d", cfg.Server.Port),
 		Handler:           a.Routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
-	slog.Info("starting server", "addr", addr)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-ctx.Done()
+		slog.Info("shutting down http server")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			slog.Error("http shutdown error", "err", err)
+		}
+	}()
+
+	slog.Info("starting server", "addr", srv.Addr)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		slog.Error("server failed", "err", err)
-		os.Exit(1)
+		stop()
 	}
+
+	wg.Wait()
+	slog.Info("shutdown complete")
 }

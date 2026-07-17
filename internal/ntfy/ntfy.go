@@ -2,8 +2,10 @@ package ntfy
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -37,7 +39,7 @@ type NtfyClient struct {
 	cfg *config.Config
 }
 
-func NewNtfyClient(cfg *config.Config) *NtfyClient {
+func New(cfg *config.Config) *NtfyClient {
 	return &NtfyClient{cfg: cfg}
 }
 
@@ -96,12 +98,14 @@ func (c *NtfyClient) sendToTopic(text, topic string, mods ...ntfyMessageModifica
 	return nil
 }
 
-func (c *NtfyClient) SubscribeAllWithReconnect() <-chan SubscriptionMessage {
-	ch := make(chan SubscriptionMessage)
+func (c *NtfyClient) Run(ctx context.Context, incomingMsgs chan<- SubscriptionMessage) {
+	defer close(incomingMsgs)
+	// ch := make(chan SubscriptionMessage)
 
 	if len(c.cfg.Inbound) == 0 {
-		slog.Info("no inbound topics configured, skipping subscription")
-		return ch
+		slog.Info("no inbound topics configured, ntfy subscriber disabled")
+		<-ctx.Done()
+		return
 	}
 
 	topics := make([]string, len(c.cfg.Inbound))
@@ -110,23 +114,29 @@ func (c *NtfyClient) SubscribeAllWithReconnect() <-chan SubscriptionMessage {
 	}
 	combined := strings.Join(topics, ",")
 
-	go func() {
-		for {
-			slog.Info("subscribing to ntfy topics", "topics", combined)
-			if err := c.subscribe(combined, ch); err != nil {
-				slog.Error("ntfy subscription dropped, reconnecting in 5s", "topics", combined, "err", err)
-			}
-			time.Sleep(5 * time.Second)
-		}
-	}()
+	for {
+		slog.Info("subscribing to ntfy topics", "topics", combined)
+		err := c.subscribe(ctx, combined, incomingMsgs)
 
-	return ch
+		if ctx.Err() != nil {
+			// shutdown requested - err is likely 'context cancelled', normal
+			return
+		}
+
+		slog.Error("ntfy subscription dropped, reconnecting in 5s", "topics", combined, "err", err)
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Second):
+		}
+	}
 }
 
-func (c *NtfyClient) subscribe(topics string, ch chan<- SubscriptionMessage) error {
+func (c *NtfyClient) subscribe(ctx context.Context, topics string, incomingMsgs chan<- SubscriptionMessage) error {
 	url := fmt.Sprintf("%s/%s/json", strings.TrimRight(c.cfg.Ntfy.Server, "/"), topics)
 
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return err
 	}
@@ -139,7 +149,8 @@ func (c *NtfyClient) subscribe(topics string, ch chan<- SubscriptionMessage) err
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("ntfy subscription failed with status %d", resp.StatusCode)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("ntfy subscription failed with status %d: %s", resp.StatusCode, body)
 	}
 
 	slog.Info("successfully subscribed to ntfy topics", "host", c.cfg.Ntfy.Server, "topics", topics)
@@ -165,7 +176,13 @@ func (c *NtfyClient) subscribe(topics string, ch chan<- SubscriptionMessage) err
 		}
 
 		outbound := c.resolveOutbound(msg.Topic)
-		ch <- SubscriptionMessage{Text: msg.Message, Outbound: outbound, Inbound: msg.Topic}
+		sub := SubscriptionMessage{Text: msg.Message, Outbound: outbound, Inbound: msg.Topic}
+
+		select {
+		case incomingMsgs <- sub:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 
 	return scanner.Err()
