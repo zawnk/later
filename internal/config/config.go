@@ -92,6 +92,10 @@ func (c *Config) validate() error {
 		return errors.New("ntfy.token is required")
 	}
 
+	if strings.TrimSpace(c.Ntfy.DefaultOutbound) == "" {
+		return errors.New("ntfy.default_outbound is required")
+	}
+
 	if len(c.AuthTokens) == 0 && len(c.Inbound) == 0 {
 		return errors.New("configure at least one of auth_tokens or inbound; otherwise no way to create reminders")
 	}
