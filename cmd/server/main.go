@@ -73,6 +73,7 @@ func main() {
 
 	// start scheduler
 	sched := scheduler.New(s, ntfyClient.Send)
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		go sched.Run(ctx)
