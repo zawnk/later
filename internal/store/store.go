@@ -2,12 +2,16 @@ package store
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/zawnk/later/internal/reminder"
 )
+
+const stateFileMode os.FileMode = 0600
 
 type Store struct {
 	mu          sync.Mutex
@@ -18,8 +22,8 @@ type Store struct {
 
 func New(dataDir string) (*Store, error) {
 	s := &Store{
-		pendingPath: dataDir + "/pending.json",
-		archivePath: dataDir + "/archive.json",
+		pendingPath: filepath.Join(dataDir, "pending.json"),
+		archivePath: filepath.Join(dataDir, "archive.json"),
 	}
 	if err := s.loadPending(); err != nil {
 		return nil, err
@@ -33,7 +37,7 @@ func New(dataDir string) (*Store, error) {
 
 func (s *Store) ensureArchive() error {
 	if _, err := os.Stat(s.archivePath); os.IsNotExist(err) {
-		return os.WriteFile(s.archivePath, []byte("[]"), 0644)
+		return writeAtomic(s.archivePath, []byte("[]"))
 	}
 	return nil
 }
@@ -42,7 +46,7 @@ func (s *Store) loadPending() error {
 	data, err := os.ReadFile(s.pendingPath)
 	if os.IsNotExist(err) {
 		s.pending = []reminder.Reminder{}
-		return os.WriteFile(s.pendingPath, []byte("[]"), 0644)
+		return writeAtomic(s.pendingPath, []byte("[]"))
 	}
 	if err != nil {
 		return err
@@ -55,7 +59,7 @@ func (s *Store) savePending() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.pendingPath, data, 0644)
+	return writeAtomic(s.pendingPath, data)
 }
 
 func (s *Store) SaveReminder(r reminder.Reminder) error {
@@ -118,7 +122,7 @@ func (s *Store) appendToArchive(r reminder.ArchivedReminder) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.archivePath, data, 0644)
+	return writeAtomic(s.archivePath, data)
 }
 
 func (s *Store) loadArchive() ([]reminder.ArchivedReminder, error) {
@@ -135,4 +139,35 @@ func (s *Store) loadArchive() ([]reminder.ArchivedReminder, error) {
 
 func (s *Store) ListArchive() ([]reminder.ArchivedReminder, error) {
 	return s.loadArchive()
+}
+
+func writeAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return fmt.Errorf("error when creating temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+
+	if err := tmp.Chmod(stateFileMode); err != nil {
+		tmp.Close()
+		return fmt.Errorf("error when chmod on temp file: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("error when writing temp file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("error when syncing temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("error when closing temp file: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("error when renaming temp file into place: %w", err)
+	}
+	return nil
 }
