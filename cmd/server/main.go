@@ -89,6 +89,7 @@ func main() {
 
 	var handler http.Handler = a.Routes()
 	if os.Getenv("LATER_HTTP_LOG") == "1" {
+		slog.Info("HTTP request logger enabled - /healthz probes suppressed")
 		handler = api.LogRequests(handler)
 	}
 
