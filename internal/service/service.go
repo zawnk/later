@@ -73,14 +73,9 @@ func (s *Service) CreateReminder(text string, outboundTopics []string) (*reminde
 		return nil, fmt.Errorf("no task text found")
 	}
 
-	id, err := reminder.GenerateID()
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate id: %w", err)
-	}
-
 	// TODO: does the Round cause any issues?
 	rem := &reminder.Reminder{
-		ID:             id,
+		ID:             reminder.GenerateID(),
 		Text:           task,
 		DueAt:          result.Time.Local().Round(time.Minute),
 		CreatedAt:      time.Now(),
@@ -178,13 +173,8 @@ func (s *Service) Postpone(id string, duration string) (*reminder.Reminder, erro
 		return nil, fmt.Errorf("invalid duration: %w", err)
 	}
 
-	newID, err := reminder.GenerateID()
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate id: %w", err)
-	}
-
 	rem := &reminder.Reminder{
-		ID:             newID,
+		ID:             reminder.GenerateID(),
 		Text:           found.Text,
 		DueAt:          due.Round(time.Minute),
 		CreatedAt:      time.Now(),
