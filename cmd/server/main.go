@@ -95,7 +95,7 @@ func main() {
 	go func() {
 		defer wg.Done()
 		<-ctx.Done()
-		slog.Info("shutting down http server")
+		slog.Info("shutdown signal received - shutting down http server")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {

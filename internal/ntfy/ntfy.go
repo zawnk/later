@@ -104,6 +104,7 @@ func (c *NtfyClient) Run(ctx context.Context, incomingMsgs chan<- SubscriptionMe
 	if len(c.cfg.Inbound) == 0 {
 		slog.Info("no inbound topics configured, ntfy subscriber disabled")
 		<-ctx.Done()
+		slog.Info("ntfy subscriber stopped")
 		return
 	}
 
@@ -118,7 +119,7 @@ func (c *NtfyClient) Run(ctx context.Context, incomingMsgs chan<- SubscriptionMe
 		err := c.subscribe(ctx, combined, incomingMsgs)
 
 		if ctx.Err() != nil {
-			// shutdown requested - err is likely 'context cancelled', normal
+			slog.Info("shutdown signal received- ntfy subscriber stopped")
 			return
 		}
 
@@ -126,6 +127,7 @@ func (c *NtfyClient) Run(ctx context.Context, incomingMsgs chan<- SubscriptionMe
 
 		select {
 		case <-ctx.Done():
+			slog.Info("ntfy subscriber stopped during reconnect wait")
 			return
 		case <-time.After(5 * time.Second):
 		}

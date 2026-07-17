@@ -34,6 +34,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			slog.Info("shutdown signal received - scheduler stopped")
 			return
 		case <-ticker.C:
 			s.tick()
