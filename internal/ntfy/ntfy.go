@@ -91,7 +91,8 @@ func (c *NtfyClient) sendToTopic(text, topic string, mods ...ntfyMessageModifica
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("ntfy returned status %d", resp.StatusCode)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("ntfy returned status %d: %s", resp.StatusCode, body)
 	}
 
 	slog.Info("notification sent", "topic", topic)
