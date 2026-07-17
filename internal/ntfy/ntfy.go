@@ -36,14 +36,24 @@ type ntfyMessageModifications struct {
 }
 
 type Client struct {
-	cfg *config.Config
+	cfg             *config.Config
+	publishClient   *http.Client
+	subscribeClient *http.Client
 }
 
 func New(cfg *config.Config) *Client {
-	return &Client{cfg: cfg}
+	return &Client{
+		cfg: cfg,
+		publishClient: &http.Client{
+			Timeout: 15 * time.Second,
+		},
+		subscribeClient: &http.Client{
+			Transport: &http.Transport{ResponseHeaderTimeout: 10 * time.Second},
+		},
+	}
 }
 
-func (c *Client) Send(r reminder.Reminder, late bool) error {
+func (c *Client) Send(ctx context.Context, r reminder.Reminder, late bool) error {
 	topics := r.OutboundTopics
 	if len(topics) == 0 {
 		topics = []string{c.cfg.Ntfy.DefaultOutbound}
@@ -51,14 +61,14 @@ func (c *Client) Send(r reminder.Reminder, late bool) error {
 
 	// TODO: single send to multiple topics possible?
 	for _, topic := range topics {
-		if err := c.sendToTopic(r.Text, topic, ntfyMessageModifications{title: "Reminder", late: late}); err != nil {
+		if err := c.sendToTopic(ctx, r.Text, topic, ntfyMessageModifications{title: "Reminder", late: late}); err != nil {
 			return fmt.Errorf("failed to send to topic %s: %w", topic, err)
 		}
 	}
 	return nil
 }
 
-func (c *Client) sendToTopic(text, topic string, mods ...ntfyMessageModifications) error {
+func (c *Client) sendToTopic(ctx context.Context, text, topic string, mods ...ntfyMessageModifications) error {
 	var mod ntfyMessageModifications
 	if len(mods) > 0 {
 		mod = mods[0]
@@ -70,7 +80,7 @@ func (c *Client) sendToTopic(text, topic string, mods ...ntfyMessageModification
 
 	url := fmt.Sprintf("%s/%s", strings.TrimRight(c.cfg.Ntfy.Server, "/"), topic)
 
-	req, err := http.NewRequest("POST", url, strings.NewReader(text))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(text))
 	if err != nil {
 		return err
 	}
@@ -84,11 +94,14 @@ func (c *Client) sendToTopic(text, topic string, mods ...ntfyMessageModification
 	}
 	req.Header.Set("Authorization", "Bearer "+c.cfg.Ntfy.Token)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := c.publishClient.Do(req)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
@@ -138,10 +151,6 @@ func (c *Client) Run(ctx context.Context, incomingMsgs chan<- SubscriptionMessag
 func (c *Client) subscribe(ctx context.Context, topics string, incomingMsgs chan<- SubscriptionMessage) error {
 	url := fmt.Sprintf("%s/%s/json", strings.TrimRight(c.cfg.Ntfy.Server, "/"), topics)
 
-	var ntfyHttpClient = &http.Client{
-		Transport: &http.Transport{ResponseHeaderTimeout: 10 * time.Second},
-	}
-
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return err
@@ -149,7 +158,7 @@ func (c *Client) subscribe(ctx context.Context, topics string, incomingMsgs chan
 
 	req.Header.Set("Authorization", "Bearer "+c.cfg.Ntfy.Token)
 
-	resp, err := ntfyHttpClient.Do(req)
+	resp, err := c.subscribeClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -206,11 +215,11 @@ func (c *Client) resolveOutbound(topic string) []string {
 	return []string{c.cfg.Ntfy.DefaultOutbound}
 }
 
-func (c *Client) SendConfirmation(topic string, r *reminder.Reminder) error {
+func (c *Client) SendConfirmation(ctx context.Context, topic string, r *reminder.Reminder) error {
 	msg := fmt.Sprintf("Reminder set for %s ✅ (%s)", r.DueAt.Format("Mon Jan 2, 15:04"), r.ID)
-	return c.sendSystem(msg, topic)
+	return c.sendSystem(ctx, msg, topic)
 }
 
-func (c *Client) sendSystem(text, topic string) error {
-	return c.sendToTopic("[later] "+text, topic)
+func (c *Client) sendSystem(ctx context.Context, text, topic string) error {
+	return c.sendToTopic(ctx, "[later] "+text, topic)
 }

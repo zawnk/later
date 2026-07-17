@@ -11,11 +11,11 @@ import (
 
 type Scheduler struct {
 	store     *store.Store
-	notify    func(r reminder.Reminder, late bool) error
+	notify    func(ctx context.Context, r reminder.Reminder, late bool) error
 	startedAt time.Time
 }
 
-func New(s *store.Store, notify func(r reminder.Reminder, late bool) error) *Scheduler {
+func New(s *store.Store, notify func(ctx context.Context, r reminder.Reminder, late bool) error) *Scheduler {
 	return &Scheduler{
 		store:     s,
 		notify:    notify,
@@ -25,7 +25,7 @@ func New(s *store.Store, notify func(r reminder.Reminder, late bool) error) *Sch
 
 func (s *Scheduler) Run(ctx context.Context) {
 	// fire any missed reminders on startup
-	s.tick()
+	s.tick(ctx)
 
 	// TODO: is one minute fine?
 	ticker := time.NewTicker(time.Minute)
@@ -37,17 +37,17 @@ func (s *Scheduler) Run(ctx context.Context) {
 			slog.Info("shutdown signal received - scheduler stopped")
 			return
 		case <-ticker.C:
-			s.tick()
+			s.tick(ctx)
 		}
 	}
 }
 
-func (s *Scheduler) tick() {
+func (s *Scheduler) tick(ctx context.Context) {
 	now := time.Now()
 	for _, r := range s.store.ListPendingReminders() {
 		if r.DueAt.Before(now) || r.DueAt.Equal(now) {
 			late := r.DueAt.Before(s.startedAt)
-			if err := s.notify(r, late); err != nil {
+			if err := s.notify(ctx, r, late); err != nil {
 				slog.Error("failed to send notification", "id", r.ID, "err", err)
 				continue
 			}

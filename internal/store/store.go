@@ -134,7 +134,10 @@ func (s *Store) loadArchive() ([]reminder.ArchivedReminder, error) {
 		return nil, err
 	}
 	var archive []reminder.ArchivedReminder
-	return archive, json.Unmarshal(data, &archive)
+	if err := json.Unmarshal(data, &archive); err != nil {
+		return nil, fmt.Errorf("parse archive %s: %w", s.archivePath, err)
+	}
+	return archive, nil
 }
 
 func (s *Store) ListArchive() ([]reminder.ArchivedReminder, error) {

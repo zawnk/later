@@ -69,7 +69,7 @@ func main() {
 				}
 				slog.Info("reminder created via ntfy", "topic", rem.OutboundTopics, "id", rem.ID, "due", rem.DueAt)
 
-				if err := ntfyClient.SendConfirmation(msg.Inbound, rem); err != nil {
+				if err := ntfyClient.SendConfirmation(ctx, msg.Inbound, rem); err != nil {
 					slog.Error("failed to send confirmation", "err", err)
 				}
 			}
