@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -35,16 +36,32 @@ func (a *API) Routes() *http.ServeMux {
 func (a *API) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		for _, t := range a.cfg.AuthTokens {
-			if t.Token == token {
-				// find allowed outbound topics for this token
-				r = r.WithContext(contextWithToken(r.Context(), t))
-				next(w, r)
-				return
-			}
+		verifiedToken, authorized := a.tokenCompare(token)
+
+		if authorized == false {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
 		}
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+
+		// find allowed outbound topics for this token
+		r = r.WithContext(contextWithToken(r.Context(), verifiedToken))
+		next(w, r)
 	}
+}
+
+func (a *API) tokenCompare(presented string) (config.Token, bool) {
+	if presented == "" {
+		return config.Token{}, false
+	}
+
+	presentedBytes := []byte(presented)
+	for _, t := range a.cfg.AuthTokens {
+		stored := []byte(t.Token)
+		if subtle.ConstantTimeCompare(stored, presentedBytes) == 1 {
+			return t, true
+		}
+	}
+	return config.Token{}, false
 }
 
 func (a *API) health(w http.ResponseWriter, r *http.Request) {
@@ -56,6 +73,8 @@ func (a *API) createReminder(w http.ResponseWriter, r *http.Request) {
 		Text           string   `json:"text"`
 		OutboundTopics []string `json:"outbound_topics"`
 	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return

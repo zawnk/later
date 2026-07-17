@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/zawnk/later/internal/api"
 	"github.com/zawnk/later/internal/config"
@@ -60,8 +61,17 @@ func main() {
 	// start API
 	a := api.New(cfg, svc)
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
+
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           a.Routes(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	slog.Info("starting server", "addr", addr)
-	if err := http.ListenAndServe(addr, a.Routes()); err != nil {
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		slog.Error("server failed", "err", err)
 		os.Exit(1)
 	}
