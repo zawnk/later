@@ -79,7 +79,6 @@ func (c *Client) Send(ctx context.Context, r reminder.Reminder, late bool) error
 		return fmt.Errorf("reminder %s has no outbound topics", r.ID)
 	}
 
-	// TODO: single send to multiple topics possible?
 	for _, topic := range topics {
 		mods := ntfyMessageModifications{
 			title:    "Reminder",
