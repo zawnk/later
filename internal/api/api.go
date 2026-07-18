@@ -90,7 +90,11 @@ func (a *API) createReminder(w http.ResponseWriter, r *http.Request) {
 	token := tokenFromContext(r.Context())
 	outbound := body.OutboundTopics
 	if len(outbound) == 0 {
-		outbound = token.Outbound
+		if token.DefaultOutbound != "" {
+			outbound = []string{token.DefaultOutbound}
+		} else {
+			outbound = token.Outbound
+		}
 	} else {
 		outbound = filterAllowed(outbound, token.Outbound)
 		if len(outbound) == 0 {
