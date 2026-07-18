@@ -3,7 +3,6 @@ package api
 import (
 	"crypto/subtle"
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
@@ -45,7 +44,6 @@ func (a *API) auth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		// find allowed outbound topics for this token
 		r = r.WithContext(contextWithToken(r.Context(), verifiedToken))
 		next(w, r)
 	}
@@ -74,6 +72,9 @@ func (a *API) createReminder(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Text           string   `json:"text"`
 		OutboundTopics []string `json:"outbound_topics"`
+		Tags           []string `json:"tags"`
+		Priority       string   `json:"priority"`
+		Click          string   `json:"click"`
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
@@ -86,13 +87,11 @@ func (a *API) createReminder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// resolve outbound topics
 	token := tokenFromContext(r.Context())
 	outbound := body.OutboundTopics
 	if len(outbound) == 0 {
 		outbound = token.Outbound
 	} else {
-		// validate requested topics are allowed for this token
 		outbound = filterAllowed(outbound, token.Outbound)
 		if len(outbound) == 0 {
 			http.Error(w, "no allowed outbound topics", http.StatusForbidden)
@@ -100,10 +99,15 @@ func (a *API) createReminder(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	rem, err := a.svc.CreateReminder(body.Text, outbound)
+	rem, err := a.svc.CreateReminder(service.CreateInput{
+		Text:           body.Text,
+		OutboundTopics: outbound,
+		Tags:           body.Tags,
+		Priority:       body.Priority,
+		Click:          body.Click,
+	})
 	if err != nil {
-		slog.Error("failed to create reminder", "err", err)
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeServiceError(w, err, "failed to create reminder")
 		return
 	}
 
@@ -169,8 +173,7 @@ func (a *API) postponeReminder(w http.ResponseWriter, r *http.Request) {
 
 	rem, err := a.svc.Postpone(id, duration)
 	if err != nil {
-		slog.Error("failed to postpone reminder", "err", err)
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeServiceError(w, err, "failed to postpone reminder")
 		return
 	}
 
