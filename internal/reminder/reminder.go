@@ -13,6 +13,9 @@ type Reminder struct {
 	DueAt          time.Time `json:"due_at"`
 	CreatedAt      time.Time `json:"created_at"`
 	OutboundTopics []string  `json:"outbound_topics"`
+	Tags           []string  `json:"tags,omitempty"`
+	Priority       string    `json:"priority,omitempty"`
+	Click          string    `json:"click,omitempty"`
 }
 
 type ArchivedReminder struct {
