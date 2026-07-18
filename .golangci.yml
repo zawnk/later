@@ -1,0 +1,25 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - errorlint
+    - bodyclose
+    - gosec
+  settings:
+    errcheck:
+      exclude-functions:
+        - (io.Closer).Close
+        - (io.ReadCloser).Close
+        - (*os.File).Close
+        - fmt.Fprintf
+        - fmt.Fprintln
+    gosec:
+      excludes:
+        - G104
+        - G304
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
