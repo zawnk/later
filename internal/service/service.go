@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -16,6 +17,12 @@ import (
 )
 
 const maxReminderTextLength = 4096
+
+var (
+	ErrInvalidInput = errors.New("invalid input")
+	ErrNotFound     = errors.New("not found")
+	ErrStillPending = errors.New("still a pending reminder")
+)
 
 type Store interface {
 	SaveReminder(r reminder.Reminder) error
@@ -42,6 +49,34 @@ type Service struct {
 	now    func() time.Time
 }
 
+type CreateInput struct {
+	Text           string
+	OutboundTopics []string
+	Tags           []string
+	Priority       string
+	Click          string
+}
+
+var validPriorities = map[string]struct{}{
+	"min": {}, "low": {}, "default": {}, "high": {}, "urgent": {}, "max": {},
+	"1": {}, "2": {}, "3": {}, "4": {}, "5": {},
+}
+
+func validateNotificationOptions(in CreateInput) error {
+	if in.Priority != "" {
+		if _, ok := validPriorities[in.Priority]; !ok {
+			return fmt.Errorf("%w: invalid priority %q (want min/low/default/high/urgent or 1-5)", ErrInvalidInput, in.Priority)
+		}
+	}
+	if in.Click != "" {
+		u, err := url.Parse(in.Click)
+		if err != nil || u.Scheme == "" {
+			return fmt.Errorf("%w: click must be an absolute URL, got %q", ErrInvalidInput, in.Click)
+		}
+	}
+	return nil
+}
+
 func New(s Store) *Service {
 	w := when.New(nil)
 	w.Add(en.All...)
@@ -54,40 +89,51 @@ func New(s Store) *Service {
 	}
 }
 
-func (s *Service) CreateReminder(text string, outboundTopics []string) (*reminder.Reminder, error) {
-	text = strings.TrimSpace(text)
+func (s *Service) CreateReminder(in CreateInput) (*reminder.Reminder, error) {
+	text := strings.TrimSpace(in.Text)
 	if text == "" {
-		return nil, errors.New("empty reminder text")
+		return nil, fmt.Errorf("%w: empty reminder text", ErrInvalidInput)
+	}
+
+	if err := validateNotificationOptions(in); err != nil {
+		return nil, err
 	}
 
 	if utf8.RuneCountInString(text) > maxReminderTextLength {
-		return nil, fmt.Errorf("reminder text too long (max %d chars)", maxReminderTextLength)
+		return nil, fmt.Errorf("%w: reminder text too long (max %d chars)", ErrInvalidInput, maxReminderTextLength)
 	}
 
 	text = preprocessDuration(text)
 
 	result, err := s.parser.Parse(text, s.now())
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse time: %w", err)
+		return nil, fmt.Errorf("%w: failed to parse time: %w", ErrInvalidInput, err)
 	}
 	if result == nil {
-		return nil, fmt.Errorf("no time information found in: %q", text)
+		return nil, fmt.Errorf("%w: no time information found in: %q", ErrInvalidInput, text)
 	}
 
 	task := strings.TrimSpace(strings.Replace(text, result.Text, "", 1))
 	task = strings.TrimPrefix(task, " at ")
 	task = strings.TrimSpace(task)
 	if task == "" {
-		return nil, fmt.Errorf("no task text found")
+		return nil, fmt.Errorf("%w: no task text found", ErrInvalidInput)
 	}
 
-	// TODO: does the Round cause any issues?
+	dueAt := result.Time.Local().Round(time.Minute)
+	if dueAt.Before(s.now().Round(time.Minute)) {
+		return nil, fmt.Errorf("%w: due time %s is in the past", ErrInvalidInput, dueAt.Format(time.RFC3339))
+	}
+
 	rem := &reminder.Reminder{
 		ID:             reminder.GenerateID(),
 		Text:           task,
-		DueAt:          result.Time.Local().Round(time.Minute),
+		DueAt:          dueAt,
 		CreatedAt:      s.now(),
-		OutboundTopics: outboundTopics,
+		OutboundTopics: in.OutboundTopics,
+		Tags:           in.Tags,
+		Priority:       in.Priority,
+		Click:          in.Click,
 	}
 
 	if err := s.store.SaveReminder(*rem); err != nil {
@@ -97,8 +143,6 @@ func (s *Service) CreateReminder(text string, outboundTopics []string) (*reminde
 	return rem, nil
 }
 
-// preprocessDuration converts compact duration strings to forms when can parse
-// e.g. "3d" -> "3 days", "2h30m" -> "2 hours 30 minutes"
 func preprocessDuration(s string) string {
 	res := durationRegex.ReplaceAllStringFunc(s, func(match string) string {
 		parts := durationRegex.FindStringSubmatch(match)
@@ -150,15 +194,13 @@ func (s *Service) Last() (*reminder.ArchivedReminder, error) {
 }
 
 func (s *Service) Postpone(id string, duration string) (*reminder.Reminder, error) {
-	// verify it's in archive, not pending
 	pending := s.store.ListPendingReminders()
 	for _, r := range pending {
 		if r.ID == id {
-			return nil, fmt.Errorf("reminder %s is still pending, cannot postpone", id)
+			return nil, fmt.Errorf("reminder %s is %w, cannot postpone", id, ErrStillPending)
 		}
 	}
 
-	// find in archive
 	archive, err := s.store.ListArchive()
 	if err != nil {
 		return nil, err
@@ -171,12 +213,12 @@ func (s *Service) Postpone(id string, duration string) (*reminder.Reminder, erro
 		}
 	}
 	if found == nil {
-		return nil, fmt.Errorf("reminder %s not found in archive", id)
+		return nil, fmt.Errorf("reminder %s %w in archive", id, ErrNotFound)
 	}
 
 	due, err := applyDuration(duration, s.now())
 	if err != nil {
-		return nil, fmt.Errorf("invalid duration: %w", err)
+		return nil, fmt.Errorf("%w: invalid duration: %w", ErrInvalidInput, err)
 	}
 
 	rem := &reminder.Reminder{
@@ -185,6 +227,9 @@ func (s *Service) Postpone(id string, duration string) (*reminder.Reminder, erro
 		DueAt:          due.Round(time.Minute),
 		CreatedAt:      s.now(),
 		OutboundTopics: found.OutboundTopics,
+		Tags:           found.Tags,
+		Priority:       found.Priority,
+		Click:          found.Click,
 	}
 
 	if err := s.store.SaveReminder(*rem); err != nil {
