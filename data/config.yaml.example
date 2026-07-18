@@ -6,16 +6,16 @@ server:
 ntfy:
   server: https://ntfy.domain.com # used as the server for your ntfy
   token: tk_XXXXX # your ntfy token with the appropriate permissions, for example later*:rw
-  default_outbound: later-reminders-user # the default topic that is used when none is given in the request
 
 inbound:
   - topic: later-input-user # topic that later listens to for reminders
-    outbound:
-      - later-reminders-user # topic that then gets the reminders that were set in the inbound topic
+    outbound: # required: topic(s) that get the reminders set via this inbound topic
+      - later-reminders-user
 
 auth_tokens:
   - token: tk_replace_this_with_a_real_token_at_least_16_chars # generate via `ntfy token generate`
-    outbound:
-      - later-reminders-user # outbound topics that this token is allowed to set reminders for
+    outbound: # required: outbound topics this token is allowed to set reminders for
+      - later-reminders-user
+    # default_outbound: later-reminders-user # optional: where reminders without explicit topics go. Without it they fan out to ALL outbound topics above. Must be one of them
 
 late_prefix: "DELAYED:" # gets prepended to messages that get sent after a downtime of later

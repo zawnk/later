@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -27,9 +28,8 @@ type ServerConfig struct {
 }
 
 type NtfyConfig struct {
-	Server          string `yaml:"server"`
-	Token           string `yaml:"token"`
-	DefaultOutbound string `yaml:"default_outbound"`
+	Server string `yaml:"server"`
+	Token  string `yaml:"token"`
 }
 
 type Inbound struct {
@@ -38,8 +38,9 @@ type Inbound struct {
 }
 
 type Token struct {
-	Token    string   `yaml:"token"`
-	Outbound []string `yaml:"outbound"`
+	Token           string   `yaml:"token"`
+	Outbound        []string `yaml:"outbound"`
+	DefaultOutbound string   `yaml:"default_outbound"`
 }
 
 func Load(path string) (*Config, error) {
@@ -92,10 +93,6 @@ func (c *Config) validate() error {
 		return errors.New("ntfy.token is required")
 	}
 
-	if strings.TrimSpace(c.Ntfy.DefaultOutbound) == "" {
-		return errors.New("ntfy.default_outbound is required")
-	}
-
 	if len(c.AuthTokens) == 0 && len(c.Inbound) == 0 {
 		return errors.New("configure at least one of auth_tokens or inbound; otherwise no way to create reminders")
 	}
@@ -109,6 +106,13 @@ func (c *Config) validate() error {
 			return fmt.Errorf("auth_tokens[%d].token: duplicate of auth_tokens[%d]", i, prev)
 		}
 		seenTokens[t.Token] = i
+
+		if len(t.Outbound) == 0 {
+			return fmt.Errorf("auth_tokens[%d].outbound: required (topics this token may publish to)", i)
+		}
+		if t.DefaultOutbound != "" && !slices.Contains(t.Outbound, t.DefaultOutbound) {
+			return fmt.Errorf("auth_tokens[%d].default_outbound %q: must be one of the token's outbound topics", i, t.DefaultOutbound)
+		}
 	}
 
 	seenTopics := make(map[string]int, len(c.Inbound))
@@ -120,6 +124,10 @@ func (c *Config) validate() error {
 			return fmt.Errorf("inbound[%d].topic %q: duplicate of inbound[%d]", i, in.Topic, prev)
 		}
 		seenTopics[in.Topic] = i
+
+		if len(in.Outbound) == 0 {
+			return fmt.Errorf("inbound[%d].outbound: required (topics reminders from %q are published to)", i, in.Topic)
+		}
 	}
 
 	return nil
