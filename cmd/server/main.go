@@ -60,9 +60,10 @@ func main() {
 
 		wg.Add(1)
 		go func() {
+			// TODO: this eventually has to be refactored in the ntfy pkg for clearer structure
 			defer wg.Done()
 			for msg := range msgs {
-				rem, err := svc.CreateReminder(msg.Text, msg.Outbound)
+				rem, err := svc.CreateReminder(service.CreateInput{Text: msg.Text, OutboundTopics: msg.Outbound})
 				if err != nil {
 					slog.Error("failed to create reminder from ntfy", "err", err)
 					continue

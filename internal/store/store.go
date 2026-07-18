@@ -156,7 +156,7 @@ func writeAtomic(path string, data []byte) error {
 		return fmt.Errorf("error when creating temp file: %w", err)
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
+	defer func() { _ = os.Remove(tmpName) }()
 
 	if err := tmp.Chmod(stateFileMode); err != nil {
 		tmp.Close()
