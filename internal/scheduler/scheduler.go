@@ -52,7 +52,6 @@ func (s *Scheduler) tick(ctx context.Context) {
 				continue
 			}
 			if err := s.store.ArchiveReminder(r, now); err != nil {
-				// TODO: if archiving fails, reminder will fire again on next tick
 				slog.Error("failed to archive reminder", "id", r.ID, "err", err)
 			}
 		}
