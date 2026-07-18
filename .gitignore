@@ -36,3 +36,9 @@ config.yaml
 later
 pending.json
 archive.json
+!later/
+/docs
+
+# build artifacts (make build / make cover-html)
+bin/
+coverage.out
