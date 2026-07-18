@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -30,9 +31,26 @@ type ntfyMessage struct {
 }
 
 type ntfyMessageModifications struct {
-	title string
-	late  bool
-	tags  []string
+	title    string
+	late     bool
+	tags     []string
+	priority string
+	click    string
+}
+
+func priorityRank(p string) int {
+	switch p {
+	case "min", "1":
+		return 1
+	case "low", "2":
+		return 2
+	case "high", "4":
+		return 4
+	case "urgent", "max", "5":
+		return 5
+	default:
+		return 3
+	}
 }
 
 type Client struct {
@@ -58,12 +76,19 @@ func New(cfg *config.Config) *Client {
 func (c *Client) Send(ctx context.Context, r reminder.Reminder, late bool) error {
 	topics := r.OutboundTopics
 	if len(topics) == 0 {
-		topics = []string{c.cfg.Ntfy.DefaultOutbound}
+		return fmt.Errorf("reminder %s has no outbound topics", r.ID)
 	}
 
 	// TODO: single send to multiple topics possible?
 	for _, topic := range topics {
-		if err := c.sendToTopic(ctx, r.Text, topic, ntfyMessageModifications{title: "Reminder", late: late}); err != nil {
+		mods := ntfyMessageModifications{
+			title:    "Reminder",
+			late:     late,
+			tags:     r.Tags,
+			priority: r.Priority,
+			click:    r.Click,
+		}
+		if err := c.sendToTopic(ctx, r.Text, topic, mods); err != nil {
 			return fmt.Errorf("failed to send to topic %s: %w", topic, err)
 		}
 	}
@@ -87,8 +112,24 @@ func (c *Client) sendToTopic(ctx context.Context, text, topic string, mods ...nt
 		return err
 	}
 
-	if mod.late {
-		req.Header.Set("Tags", "warning")
+	tags := mod.tags
+	if mod.late && !slices.Contains(tags, "warning") {
+		tags = append([]string{"warning"}, tags...)
+	}
+	if len(tags) > 0 {
+		req.Header.Set("Tags", strings.Join(tags, ","))
+	}
+
+	priority := mod.priority
+	if mod.late && priorityRank(priority) < priorityRank("high") {
+		priority = "high"
+	}
+	if priority != "" {
+		req.Header.Set("Priority", priority)
+	}
+
+	if mod.click != "" {
+		req.Header.Set("Click", mod.click)
 	}
 
 	if mod.title != "" {
@@ -100,6 +141,7 @@ func (c *Client) sendToTopic(ctx context.Context, text, topic string, mods ...nt
 	if err != nil {
 		return err
 	}
+
 	defer func() {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
@@ -194,6 +236,10 @@ func (c *Client) subscribe(ctx context.Context, topics string, incomingMsgs chan
 		}
 
 		outbound := c.resolveOutbound(msg.Topic)
+		if len(outbound) == 0 {
+			slog.Warn("dropping message on unexpected topic", "topic", msg.Topic)
+			continue
+		}
 		sub := SubscriptionMessage{Text: msg.Message, Outbound: outbound, Inbound: msg.Topic}
 
 		select {
@@ -209,12 +255,10 @@ func (c *Client) subscribe(ctx context.Context, topics string, incomingMsgs chan
 func (c *Client) resolveOutbound(topic string) []string {
 	for _, inbound := range c.cfg.Inbound {
 		if inbound.Topic == topic {
-			if len(inbound.Outbound) > 0 {
-				return inbound.Outbound
-			}
+			return inbound.Outbound
 		}
 	}
-	return []string{c.cfg.Ntfy.DefaultOutbound}
+	return nil
 }
 
 func (c *Client) SendConfirmation(ctx context.Context, topic string, r *reminder.Reminder) error {

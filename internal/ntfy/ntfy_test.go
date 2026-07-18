@@ -1,0 +1,541 @@
+package ntfy
+
+import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/zawnk/later/internal/config"
+	"github.com/zawnk/later/internal/reminder"
+)
+
+type recordedRequest struct {
+	method string
+	path   string
+	header http.Header
+	body   string
+}
+
+func recordingServer(t *testing.T) (*httptest.Server, func() []recordedRequest) {
+	t.Helper()
+
+	var mu sync.Mutex
+	var reqs []recordedRequest
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		reqs = append(reqs, recordedRequest{
+			method: r.Method,
+			path:   r.URL.Path,
+			header: r.Header.Clone(),
+			body:   string(body),
+		})
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	getReqs := func() []recordedRequest {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(reqs)
+	}
+	return srv, getReqs
+}
+
+func testConfig(serverURL string) *config.Config {
+	return &config.Config{
+		Ntfy: config.NtfyConfig{
+			Server: serverURL,
+			Token:  "tk_test_token",
+		},
+		LatePrefix: "DELAYED:",
+		Inbound: []config.Inbound{
+			{Topic: "inbound-a", Outbound: []string{"out-1", "out-2"}},
+			{Topic: "inbound-b", Outbound: []string{"out-3"}},
+		},
+	}
+}
+
+func TestResolveOutbound(t *testing.T) {
+	c := New(testConfig("http://irrelevant"))
+
+	tests := []struct {
+		name  string
+		topic string
+		want  []string
+	}{
+		{"topic with configured outbound list", "inbound-a", []string{"out-1", "out-2"}},
+		{"second topic resolves to its own list", "inbound-b", []string{"out-3"}},
+		{"unlikely unknown topic resolves to nil (message gets dropped)", "never-heard-of-it", nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := c.resolveOutbound(tt.topic)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("resolveOutbound(%q) = %v, want %v", tt.topic, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSend(t *testing.T) {
+	srv, getReqs := recordingServer(t)
+	cfg := testConfig(srv.URL)
+	c := New(cfg)
+
+	r := reminder.Reminder{
+		ID:             "abc123",
+		Text:           "buy milk",
+		OutboundTopics: []string{"topic-a"},
+	}
+
+	if err := c.Send(context.Background(), r, false); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+
+	reqs := getReqs()
+	if len(reqs) != 1 {
+		t.Fatalf("fake server saw %d requests, want 1", len(reqs))
+	}
+	req := reqs[0]
+
+	if req.path != "/topic-a" {
+		t.Errorf("request path = %q, want %q", req.path, "/topic-a")
+	}
+
+	if req.method != http.MethodPost {
+		t.Errorf("request method = %q, want POST", req.method)
+	}
+
+	if req.body != "buy milk" {
+		t.Errorf("request body = %q, want %q", req.body, "buy milk")
+	}
+
+	if got := req.header.Get("Title"); got != "Reminder" {
+		t.Errorf("Title header = %q, want %q", got, "Reminder")
+	}
+
+	if got := req.header.Get("Authorization"); got != "Bearer tk_test_token" {
+		t.Errorf("Authorization header = %q, want %q", got, "Bearer tk_test_token")
+	}
+
+	if got := req.header.Get("Tags"); got != "" {
+		t.Errorf("Tags header = %q, want it unset for an on-time reminder", got)
+	}
+}
+
+func TestSend_Late(t *testing.T) {
+	srv, getReqs := recordingServer(t)
+	c := New(testConfig(srv.URL))
+
+	r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}}
+	if err := c.Send(context.Background(), r, true); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+
+	reqs := getReqs()
+	if len(reqs) != 1 {
+		t.Fatalf("fake server saw %d requests, want 1", len(reqs))
+	}
+
+	if reqs[0].body != "DELAYED: buy milk" {
+		t.Errorf("late body = %q, want %q", reqs[0].body, "DELAYED: buy milk")
+	}
+
+	if got := reqs[0].header.Get("Tags"); got != "warning" {
+		t.Errorf("Tags header = %q, want %q", got, "warning")
+	}
+}
+
+func TestSend_Tags(t *testing.T) {
+	tests := []struct {
+		name     string
+		tags     []string
+		late     bool
+		wantTags string
+	}{
+		{"no tags, not late", nil, false, ""},
+		{"custom tags pass through comma-separated", []string{"partying_face", "birthday"}, false, "partying_face,birthday"},
+		{"late prepends warning to custom tags", []string{"birthday"}, true, "warning,birthday"},
+		{"late with user-supplied warning does not duplicate it", []string{"birthday", "warning"}, true, "birthday,warning"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, getReqs := recordingServer(t)
+			c := New(testConfig(srv.URL))
+
+			r := reminder.Reminder{Text: "buy cake", OutboundTopics: []string{"topic-a"}, Tags: tt.tags}
+			if err := c.Send(context.Background(), r, tt.late); err != nil {
+				t.Fatalf("Send() error = %v", err)
+			}
+
+			reqs := getReqs()
+			if len(reqs) != 1 {
+				t.Fatalf("fake server saw %d requests, want 1", len(reqs))
+			}
+
+			if got := reqs[0].header.Get("Tags"); got != tt.wantTags {
+				t.Errorf("Tags header = %q, want %q", got, tt.wantTags)
+			}
+		})
+	}
+}
+
+func TestSend_Priority(t *testing.T) {
+	tests := []struct {
+		name         string
+		priority     string
+		late         bool
+		wantPriority string
+	}{
+		{"no priority, not late: no header", "", false, ""},
+		{"explicit priority passes through", "low", false, "low"},
+		{"late bumps unset priority to high", "", true, "high"},
+		{"late bumps low to high", "low", true, "high"},
+		{"late keeps urgent", "urgent", true, "urgent"},
+		{"late bump works on digit form too", "2", true, "high"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, getReqs := recordingServer(t)
+			c := New(testConfig(srv.URL))
+
+			r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}, Priority: tt.priority}
+			if err := c.Send(context.Background(), r, tt.late); err != nil {
+				t.Fatalf("Send() error = %v", err)
+			}
+
+			reqs := getReqs()
+			if len(reqs) != 1 {
+				t.Fatalf("fake server saw %d requests, want 1", len(reqs))
+			}
+
+			if got := reqs[0].header.Get("Priority"); got != tt.wantPriority {
+				t.Errorf("Priority header = %q, want %q", got, tt.wantPriority)
+			}
+		})
+	}
+}
+
+func TestSend_Click(t *testing.T) {
+	tests := []struct {
+		name      string
+		click     string
+		wantClick string
+	}{
+		{"no click: no header", "", ""},
+		{"click URL is sent as the Click header", "https://example.com/x", "https://example.com/x"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, getReqs := recordingServer(t)
+			c := New(testConfig(srv.URL))
+
+			r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}, Click: tt.click}
+			if err := c.Send(context.Background(), r, false); err != nil {
+				t.Fatalf("Send() error = %v", err)
+			}
+
+			reqs := getReqs()
+			if len(reqs) != 1 {
+				t.Fatalf("fake server saw %d requests, want 1", len(reqs))
+			}
+
+			if got := reqs[0].header.Get("Click"); got != tt.wantClick {
+				t.Errorf("Click header = %q, want %q", got, tt.wantClick)
+			}
+		})
+	}
+}
+
+func TestSend_MultipleTopics(t *testing.T) {
+	srv, getReqs := recordingServer(t)
+	c := New(testConfig(srv.URL))
+
+	r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a", "topic-b"}}
+	if err := c.Send(context.Background(), r, false); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+
+	reqs := getReqs()
+	if len(reqs) != 2 {
+		t.Fatalf("fake server saw %d requests, want 2 (one per topic)", len(reqs))
+	}
+
+	if reqs[0].path != "/topic-a" || reqs[1].path != "/topic-b" {
+		t.Errorf("request paths = %q, %q; want /topic-a then /topic-b", reqs[0].path, reqs[1].path)
+	}
+}
+
+func TestSend_NoTopicsIsAnError(t *testing.T) {
+	srv, getReqs := recordingServer(t)
+	c := New(testConfig(srv.URL))
+
+	r := reminder.Reminder{ID: "abc123", Text: "buy milk"}
+	err := c.Send(context.Background(), r, false)
+	if err == nil {
+		t.Fatal("Send() error = nil, want an error for a reminder without topics")
+	}
+
+	if !strings.Contains(err.Error(), "no outbound topics") {
+		t.Errorf("Send() error = %q, want it to say the reminder has no outbound topics", err)
+	}
+
+	if reqs := getReqs(); len(reqs) != 0 {
+		t.Errorf("fake server saw %d requests, want 0", len(reqs))
+	}
+}
+
+func TestSend_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("access denied"))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := New(testConfig(srv.URL))
+	r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}}
+
+	err := c.Send(context.Background(), r, false)
+	if err == nil {
+		t.Fatal("Send() error = nil, want an error for a 403 response")
+	}
+
+	if !strings.Contains(err.Error(), "403") {
+		t.Errorf("Send() error = %q, want it to mention the status code 403", err)
+	}
+
+	if !strings.Contains(err.Error(), "access denied") {
+		t.Errorf("Send() error = %q, want it to include the response body", err)
+	}
+
+	if !strings.Contains(err.Error(), "topic-a") {
+		t.Errorf("Send() error = %q, want it to name the failing topic", err)
+	}
+}
+
+func TestSendConfirmation(t *testing.T) {
+	srv, getReqs := recordingServer(t)
+	c := New(testConfig(srv.URL))
+
+	r := &reminder.Reminder{
+		ID:    "abc123",
+		DueAt: time.Date(2026, 6, 15, 9, 0, 0, 0, time.UTC),
+	}
+	if err := c.SendConfirmation(context.Background(), "inbound-a", r); err != nil {
+		t.Fatalf("SendConfirmation() error = %v", err)
+	}
+
+	reqs := getReqs()
+	if len(reqs) != 1 {
+		t.Fatalf("fake server saw %d requests, want 1", len(reqs))
+	}
+	req := reqs[0]
+
+	if req.path != "/inbound-a" {
+		t.Errorf("request path = %q, want %q", req.path, "/inbound-a")
+	}
+
+	if !strings.HasPrefix(req.body, "[later] ") {
+		t.Errorf("confirmation body = %q, want the %q prefix (loop prevention)", req.body, "[later] ")
+	}
+
+	if !strings.Contains(req.body, "abc123") {
+		t.Errorf("confirmation body = %q, want it to contain the reminder ID", req.body)
+	}
+
+	if !strings.Contains(req.body, "Mon Jun 15, 09:00") {
+		t.Errorf("confirmation body = %q, want it to contain the formatted due time", req.body)
+	}
+
+	if got := req.header.Get("Title"); got != "" {
+		t.Errorf("Title header = %q -- confirmations currently have no title", got)
+	}
+}
+
+func TestSubscribe(t *testing.T) {
+	stream := strings.Join([]string{
+		`{"event":"keepalive","topic":"inbound-a"}`,
+		`{"event":"open","topic":"inbound-a"}`,
+		`this is not json`,
+		`{"event":"message","topic":"inbound-a","message":"buy milk in 3 days"}`,
+		`{"event":"message","topic":"inbound-a","message":"[later] Reminder set for ..."}`,
+		`{"event":"message","topic":"never-heard-of-it","message":"should be dropped"}`,
+		`{"event":"message","topic":"inbound-b","message":"water plants tomorrow"}`,
+		"",
+	}, "\n")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/inbound-a,inbound-b/json" {
+			t.Errorf("subscribe path = %q, want %q", r.URL.Path, "/inbound-a,inbound-b/json")
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer tk_test_token" {
+			t.Errorf("subscribe Authorization header = %q, want %q", got, "Bearer tk_test_token")
+		}
+		_, _ = io.WriteString(w, stream)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := New(testConfig(srv.URL))
+
+	msgs := make(chan SubscriptionMessage, 16)
+	if err := c.subscribe(context.Background(), "inbound-a,inbound-b", msgs); err != nil {
+		t.Fatalf("subscribe() error = %v", err)
+	}
+	close(msgs)
+
+	var got []SubscriptionMessage
+	for m := range msgs {
+		got = append(got, m)
+	}
+
+	if len(got) != 2 {
+		t.Fatalf("subscribe delivered %d messages, want 2; got: %+v", len(got), got)
+	}
+
+	if got[0].Text != "buy milk in 3 days" {
+		t.Errorf("first message Text = %q, want %q", got[0].Text, "buy milk in 3 days")
+	}
+
+	if got[0].Inbound != "inbound-a" {
+		t.Errorf("first message Inbound = %q, want %q", got[0].Inbound, "inbound-a")
+	}
+
+	if !slices.Equal(got[0].Outbound, []string{"out-1", "out-2"}) {
+		t.Errorf("first message Outbound = %v, want the topic's configured outbound list", got[0].Outbound)
+	}
+
+	if got[1].Text != "water plants tomorrow" {
+		t.Errorf("second message Text = %q, want %q", got[1].Text, "water plants tomorrow")
+	}
+
+	if !slices.Equal(got[1].Outbound, []string{"out-3"}) {
+		t.Errorf("second message Outbound = %v, want inbound-b's configured outbound list", got[1].Outbound)
+	}
+}
+
+func TestSubscribe_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("bad token"))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := New(testConfig(srv.URL))
+	msgs := make(chan SubscriptionMessage, 1)
+
+	err := c.subscribe(context.Background(), "inbound-a", msgs)
+	if err == nil {
+		t.Fatal("subscribe() error = nil, want an error for a 401 response")
+	}
+
+	if !strings.Contains(err.Error(), "401") {
+		t.Errorf("subscribe() error = %q, want it to mention the status code 401", err)
+	}
+
+	if !strings.Contains(err.Error(), "bad token") {
+		t.Errorf("subscribe() error = %q, want it to include the response body", err)
+	}
+}
+
+func TestRun_ReconnectsAfterStreamDrops(t *testing.T) {
+	var mu sync.Mutex
+	connections := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		connections++
+		mu.Unlock()
+		_, _ = io.WriteString(w, `{"event":"message","topic":"inbound-a","message":"hi"}`+"\n")
+	}))
+	t.Cleanup(srv.Close)
+
+	c := New(testConfig(srv.URL))
+	c.reconnectWait = time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	msgs := make(chan SubscriptionMessage)
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		c.Run(ctx, msgs)
+	}()
+
+	for i := range 2 {
+		select {
+		case m := <-msgs:
+			if m.Text != "hi" {
+				t.Errorf("message %d Text = %q, want %q", i, m.Text, "hi")
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for message %d -- Run did not reconnect?", i)
+		}
+	}
+
+	cancel()
+
+	for {
+		select {
+		case _, ok := <-msgs:
+			if !ok {
+				select {
+				case <-time.After(5 * time.Second):
+					t.Fatal("Run did not return after its channel closed")
+				case <-runDone:
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				if connections < 2 {
+					t.Errorf("server saw %d connections, want at least 2 (reconnect)", connections)
+				}
+				return
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("Run did not close the message channel after ctx cancel")
+		}
+	}
+}
+
+func TestRun_NoInboundTopics(t *testing.T) {
+	srv, getReqs := recordingServer(t)
+	cfg := testConfig(srv.URL)
+	cfg.Inbound = nil
+	c := New(cfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	msgs := make(chan SubscriptionMessage)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.Run(ctx, msgs)
+	}()
+
+	select {
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return on a cancelled context")
+	case <-done:
+	}
+
+	if _, ok := <-msgs; ok {
+		t.Error("received a message on the channel, want it closed with no messages")
+	}
+
+	if reqs := getReqs(); len(reqs) != 0 {
+		t.Errorf("server saw %d requests, want 0 when no inbound topics are configured", len(reqs))
+	}
+}
