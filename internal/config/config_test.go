@@ -157,6 +157,32 @@ func TestValidate(t *testing.T) {
 			mutate:  func(c *Config) { c.Inbound = []Inbound{{Topic: "inbound-topic"}} },
 			wantErr: "inbound[0].outbound: required",
 		},
+
+		{
+			name: "token outbound overlapping an inbound topic is rejected",
+			mutate: func(c *Config) {
+				c.Inbound = []Inbound{{Topic: "inbound-topic", Outbound: []string{"out-topic"}}}
+				c.AuthTokens[0].Outbound = []string{"inbound-topic"}
+			},
+			wantErr: "would create a notification loop",
+		},
+		{
+			name: "inbound outbound overlapping another inbound topic is rejected",
+			mutate: func(c *Config) {
+				c.Inbound = []Inbound{
+					{Topic: "inbound-a", Outbound: []string{"inbound-b"}},
+					{Topic: "inbound-b", Outbound: []string{"out-topic"}},
+				}
+			},
+			wantErr: "would create a notification loop",
+		},
+		{
+			name: "inbound topic feeding back into itself is rejected",
+			mutate: func(c *Config) {
+				c.Inbound = []Inbound{{Topic: "inbound-topic", Outbound: []string{"inbound-topic"}}}
+			},
+			wantErr: "would create a notification loop",
+		},
 	}
 
 	for _, tt := range tests {

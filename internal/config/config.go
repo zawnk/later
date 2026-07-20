@@ -130,5 +130,20 @@ func (c *Config) validate() error {
 		}
 	}
 
+	for i, t := range c.AuthTokens {
+		for _, out := range t.Outbound {
+			if _, isInbound := seenTopics[out]; isInbound {
+				return fmt.Errorf("auth_tokens[%d].outbound %q: also configured as an inbound topic (would create a notification loop)", i, out)
+			}
+		}
+	}
+	for i, in := range c.Inbound {
+		for _, out := range in.Outbound {
+			if _, isInbound := seenTopics[out]; isInbound {
+				return fmt.Errorf("inbound[%d].outbound %q: also configured as an inbound topic (would create a notification loop)", i, out)
+			}
+		}
+	}
+
 	return nil
 }
