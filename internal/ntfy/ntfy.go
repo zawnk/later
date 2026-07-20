@@ -294,7 +294,7 @@ func (c *Client) subscribe(ctx context.Context, topics, since string, incomingMs
 func (c *Client) resolveOutbound(topic string) []string {
 	for _, inbound := range c.cfg.Inbound {
 		if inbound.Topic == topic {
-			return inbound.Outbound
+			return slices.Clone(inbound.Outbound)
 		}
 	}
 	return nil
