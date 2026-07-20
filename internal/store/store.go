@@ -55,7 +55,10 @@ func (s *Store) loadPending() error {
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal(data, &s.pending)
+	if err := json.Unmarshal(data, &s.pending); err != nil {
+		return fmt.Errorf("parse pending %s: %w", s.pendingPath, err)
+	}
+	return nil
 }
 
 func (s *Store) savePending() error {
