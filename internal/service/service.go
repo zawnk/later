@@ -57,14 +57,9 @@ type CreateInput struct {
 	Click          string
 }
 
-var validPriorities = map[string]struct{}{
-	"min": {}, "low": {}, "default": {}, "high": {}, "urgent": {}, "max": {},
-	"1": {}, "2": {}, "3": {}, "4": {}, "5": {},
-}
-
 func validateNotificationOptions(in CreateInput) error {
 	if in.Priority != "" {
-		if _, ok := validPriorities[in.Priority]; !ok {
+		if !reminder.IsValidPriority(in.Priority) {
 			return fmt.Errorf("%w: invalid priority %q (want min/low/default/high/urgent or 1-5)", ErrInvalidInput, in.Priority)
 		}
 	}

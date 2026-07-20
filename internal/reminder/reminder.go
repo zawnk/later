@@ -30,3 +30,13 @@ func GenerateID() string {
 	}
 	return hex.EncodeToString(b)
 }
+
+var validPriorities = map[string]struct{}{
+	"min": {}, "low": {}, "default": {}, "high": {}, "urgent": {}, "max": {},
+	"1": {}, "2": {}, "3": {}, "4": {}, "5": {},
+}
+
+func IsValidPriority(p string) bool {
+	_, ok := validPriorities[p]
+	return ok
+}

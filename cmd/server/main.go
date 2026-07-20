@@ -54,8 +54,13 @@ func main() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ntfyClient.Run(ctx, func(text string, outbound []string) (*reminder.Reminder, error) {
-				return svc.CreateReminder(service.CreateInput{Text: text, OutboundTopics: outbound})
+			ntfyClient.Run(ctx, func(msg ntfy.ParsedInboundMessage) (*reminder.Reminder, error) {
+				return svc.CreateReminder(service.CreateInput{
+					Text:           msg.Text,
+					OutboundTopics: msg.Outbound,
+					Tags:           msg.Tags,
+					Priority:       msg.Priority,
+				})
 			})
 		}()
 	}
