@@ -104,12 +104,12 @@ func TestParseDirectives(t *testing.T) {
 		{
 			name:    "two different priority directives conflict",
 			in:      "finish report tomorrow !high !low",
-			wantErr: ErrConflictingPriority,
+			wantErr: errConflictingPriority,
 		},
 		{
 			name:    "two identical priority directives still conflict (no same-value carve-out)",
 			in:      "finish report tomorrow !high !high",
-			wantErr: ErrConflictingPriority,
+			wantErr: errConflictingPriority,
 		},
 	}
 

@@ -8,7 +8,7 @@ import (
 	"github.com/zawnk/later/internal/reminder"
 )
 
-var ErrConflictingPriority = errors.New("multiple priority directives in message")
+var errConflictingPriority = errors.New("multiple priority directives in message")
 
 var tagTokenRegex = regexp.MustCompile(`^#[A-Za-z0-9_]+$`)
 
@@ -28,7 +28,7 @@ loop:
 			end--
 		case strings.HasPrefix(tok, "!") && reminder.IsValidPriority(tok[1:]):
 			if seenPriority {
-				return "", nil, "", ErrConflictingPriority
+				return "", nil, "", errConflictingPriority
 			}
 			priority = tok[1:]
 			seenPriority = true
