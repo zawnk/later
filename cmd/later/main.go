@@ -117,7 +117,7 @@ func (c *CreateCmd) Run(a *app) error {
 	if a.json {
 		return a.printJSON(rem)
 	}
-	fmt.Fprintf(a.out, "reminder %s set for %s: %s\n", rem.ID, formatTime(rem.DueAt), rem.Text)
+	fmt.Fprintf(a.out, "set for %s: %s (%s)", formatTime(rem.DueAt), rem.Text, rem.ID)
 	return nil
 }
 
