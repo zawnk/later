@@ -3,6 +3,7 @@ package store
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -174,5 +175,25 @@ func TestLoadArchive_CorruptedFile(t *testing.T) {
 
 	if archive != nil {
 		t.Errorf("ListArchive() = %v, want nil slice alongside the error", archive)
+	}
+}
+
+func TestNew_CorruptedPendingFile(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := New(dir); err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	pendingPath := filepath.Join(dir, "pending.json")
+	if err := os.WriteFile(pendingPath, []byte("{not valid json"), 0600); err != nil {
+		t.Fatalf("failed to corrupt pending file: %v", err)
+	}
+
+	_, err := New(dir)
+	if err == nil {
+		t.Fatal("New() error = nil, want an error for corrupted pending.json")
+	}
+	if !strings.Contains(err.Error(), pendingPath) {
+		t.Errorf("New() error = %q, want it to mention the file path %q", err.Error(), pendingPath)
 	}
 }
