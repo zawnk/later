@@ -128,7 +128,19 @@ func (a *API) createReminder(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) listPending(w http.ResponseWriter, r *http.Request) {
-	writeJsonResponse(w, http.StatusOK, a.svc.ListPending())
+	reminders := a.svc.ListPending()
+
+	switch sortBy := r.URL.Query().Get("sort"); sortBy {
+	case "", "due":
+		slices.SortFunc(reminders, func(x, y reminder.Reminder) int { return x.DueAt.Compare(y.DueAt) })
+	case "create":
+		slices.SortFunc(reminders, func(x, y reminder.Reminder) int { return x.CreatedAt.Compare(y.CreatedAt) })
+	default:
+		writeJSONError(w, "sort must be 'due' or 'create'", http.StatusBadRequest)
+		return
+	}
+
+	writeJsonResponse(w, http.StatusOK, reminders)
 }
 
 func (a *API) listArchive(w http.ResponseWriter, r *http.Request) {
@@ -137,6 +149,7 @@ func (a *API) listArchive(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, "failed to load archive", http.StatusInternalServerError)
 		return
 	}
+	total := len(reminders)
 
 	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
 		limit, err := strconv.Atoi(limitStr)
@@ -146,11 +159,12 @@ func (a *API) listArchive(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if limit > 0 && len(reminders) > limit {
-			reminders = reminders[len(reminders)-limit:]
+		if limit > 0 && total > limit {
+			reminders = reminders[total-limit:]
 		}
 	}
 
+	w.Header().Set("X-Total-Count", strconv.Itoa(total))
 	writeJsonResponse(w, http.StatusOK, reminders)
 }
 

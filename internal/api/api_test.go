@@ -344,13 +344,14 @@ func TestListArchive_Limit(t *testing.T) {
 		query      string
 		wantStatus int
 		wantIDs    []string
+		wantTotal  string
 	}{
-		{"no limit param returns everything", "", http.StatusOK, []string{"1", "2", "3"}},
-		{"limit narrower than total returns the most recent N, oldest-first", "?limit=2", http.StatusOK, []string{"2", "3"}},
-		{"limit wider than total returns everything", "?limit=10", http.StatusOK, []string{"1", "2", "3"}},
-		{"limit=0 means no limit", "?limit=0", http.StatusOK, []string{"1", "2", "3"}},
-		{"negative limit is rejected", "?limit=-1", http.StatusBadRequest, nil},
-		{"non-numeric limit is rejected", "?limit=abc", http.StatusBadRequest, nil},
+		{"no limit param returns everything", "", http.StatusOK, []string{"1", "2", "3"}, "3"},
+		{"limit narrower than total returns the most recent N, oldest-first", "?limit=2", http.StatusOK, []string{"2", "3"}, "3"},
+		{"limit wider than total returns everything", "?limit=10", http.StatusOK, []string{"1", "2", "3"}, "3"},
+		{"limit=0 means no limit", "?limit=0", http.StatusOK, []string{"1", "2", "3"}, "3"},
+		{"negative limit is rejected", "?limit=-1", http.StatusBadRequest, nil, ""},
+		{"non-numeric limit is rejected", "?limit=abc", http.StatusBadRequest, nil, ""},
 	}
 
 	for _, tt := range tests {
@@ -369,6 +370,10 @@ func TestListArchive_Limit(t *testing.T) {
 
 			if tt.wantIDs == nil {
 				return
+			}
+
+			if got := rr.Header().Get("X-Total-Count"); got != tt.wantTotal {
+				t.Errorf("X-Total-Count = %q, want %q (the true total, unaffected by limit)", got, tt.wantTotal)
 			}
 
 			var got []reminder.ArchivedReminder
@@ -529,4 +534,57 @@ func TestGetReminder(t *testing.T) {
 			}
 		})
 	})
+}
+
+func TestListPending_Sort(t *testing.T) {
+	cfg := &config.Config{
+		AuthTokens: []config.Token{{Token: "valid-token", Outbound: []string{"topic-a"}}},
+	}
+	early := time.Date(2026, 6, 16, 9, 0, 0, 0, time.UTC)
+	late := time.Date(2026, 6, 20, 9, 0, 0, 0, time.UTC)
+	pending := []reminder.Reminder{
+		{ID: "created-first-due-later", DueAt: late, CreatedAt: early},
+		{ID: "created-later-due-first", DueAt: early, CreatedAt: late},
+	}
+
+	tests := []struct {
+		name       string
+		query      string
+		wantStatus int
+		wantFirst  string
+	}{
+		{"no sort param defaults to due", "", http.StatusOK, "created-later-due-first"},
+		{"sort=due", "?sort=due", http.StatusOK, "created-later-due-first"},
+		{"sort=create", "?sort=create", http.StatusOK, "created-first-due-later"},
+		{"unknown sort value is rejected", "?sort=bogus", http.StatusBadRequest, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &stubStore{pending: slices.Clone(pending)}
+			a := New(cfg, service.New(store))
+
+			req := httptest.NewRequest(http.MethodGet, "/reminders"+tt.query, nil)
+			req.Header.Set("Authorization", "Bearer valid-token")
+			rr := httptest.NewRecorder()
+			a.Routes().ServeHTTP(rr, req)
+
+			if rr.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d (body: %s)", rr.Code, tt.wantStatus, rr.Body.String())
+			}
+
+			if tt.wantFirst == "" {
+				return
+			}
+
+			var got []reminder.Reminder
+			if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+				t.Fatalf("decoding response: %v", err)
+			}
+
+			if len(got) == 0 || got[0].ID != tt.wantFirst {
+				t.Errorf("first reminder = %+v, want ID %q first", got, tt.wantFirst)
+			}
+		})
+	}
 }

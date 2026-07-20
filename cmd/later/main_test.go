@@ -275,13 +275,13 @@ func TestHealthcheckUnhealthy(t *testing.T) {
 }
 
 func TestListSorting(t *testing.T) {
-	early := time.Date(2026, 6, 16, 9, 0, 0, 0, time.UTC)
-	late := time.Date(2026, 6, 20, 9, 0, 0, 0, time.UTC)
+	var gotQuery string
 	stored := []reminder.Reminder{
-		{ID: "b-created-first-due-later", DueAt: late, CreatedAt: early},
-		{ID: "a-created-later-due-first", DueAt: early, CreatedAt: late},
+		{ID: "first-in-server-response"},
+		{ID: "second-in-server-response"},
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
 		_ = json.NewEncoder(w).Encode(stored)
 	}))
 	t.Cleanup(srv.Close)
@@ -293,8 +293,12 @@ func TestListSorting(t *testing.T) {
 		t.Fatalf(`runCLI("list") error = %v`, err)
 	}
 
-	if first := strings.SplitN(out.String(), "\n", 2)[0]; !strings.HasPrefix(first, "a-") {
-		t.Errorf("default list order starts with %q, want the soonest-due reminder first", first)
+	if gotQuery != "sort=due" {
+		t.Errorf("default list query = %q, want %q", gotQuery, "sort=due")
+	}
+
+	if first := strings.SplitN(out.String(), "\n", 2)[0]; !strings.HasPrefix(first, "first-in-server-response") {
+		t.Errorf("output order = %q, want the server's response order preserved (no client-side re-sort)", out.String())
 	}
 
 	out.Reset()
@@ -303,8 +307,8 @@ func TestListSorting(t *testing.T) {
 		t.Fatalf(`runCLI("list --by=create") error = %v`, err)
 	}
 
-	if first := strings.SplitN(out.String(), "\n", 2)[0]; !strings.HasPrefix(first, "b-") {
-		t.Errorf("--by=create order starts with %q, want the first-created reminder first", first)
+	if gotQuery != "sort=create" {
+		t.Errorf("--by=create query = %q, want %q", gotQuery, "sort=create")
 	}
 
 	if err := runCLI(t, a, "list", "--by=nonsense"); err == nil {
@@ -353,13 +357,20 @@ func TestCancelNotFoundIsStillAnError(t *testing.T) {
 }
 
 func TestArchiveLimit(t *testing.T) {
-	stored := []reminder.ArchivedReminder{
+	full := []reminder.ArchivedReminder{
 		{Reminder: reminder.Reminder{ID: "oldest"}},
 		{Reminder: reminder.Reminder{ID: "middle"}},
 		{Reminder: reminder.Reminder{ID: "newest"}},
 	}
+	var gotQuery string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(stored)
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("X-Total-Count", "3")
+		result := full
+		if gotQuery == "limit=2" {
+			result = full[1:]
+		}
+		_ = json.NewEncoder(w).Encode(result)
 	}))
 	t.Cleanup(srv.Close)
 
@@ -370,6 +381,10 @@ func TestArchiveLimit(t *testing.T) {
 		t.Fatalf(`runCLI("archive") error = %v`, err)
 	}
 
+	if gotQuery != "limit=20" {
+		t.Errorf("default archive query = %q, want %q (the CLI's own --limit default)", gotQuery, "limit=20")
+	}
+
 	if strings.Contains(out.String(), "--limit") {
 		t.Errorf("archive under the limit printed a truncation hint: %q", out.String())
 	}
@@ -377,6 +392,10 @@ func TestArchiveLimit(t *testing.T) {
 	out.Reset()
 	if err := runCLI(t, a, "archive", "--limit=2"); err != nil {
 		t.Fatalf(`runCLI("archive --limit=2") error = %v`, err)
+	}
+
+	if gotQuery != "limit=2" {
+		t.Errorf("archive --limit=2 query = %q, want %q", gotQuery, "limit=2")
 	}
 	got := out.String()
 
@@ -389,7 +408,7 @@ func TestArchiveLimit(t *testing.T) {
 	}
 
 	if !strings.Contains(got, "showing 2 of 3") {
-		t.Errorf("--limit=2 output = %q, want the truncation hint", got)
+		t.Errorf("--limit=2 output = %q, want the truncation hint built from X-Total-Count", got)
 	}
 }
 

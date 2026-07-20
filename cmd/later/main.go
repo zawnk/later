@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"slices"
 	"strings"
 	"time"
 
@@ -131,16 +130,9 @@ func (l *ListCmd) Run(a *app) error {
 	if err != nil {
 		return err
 	}
-	reminders, err := cl.listPending()
+	reminders, err := cl.listPending(l.By)
 	if err != nil {
 		return err
-	}
-
-	switch l.By {
-	case "create":
-		slices.SortFunc(reminders, func(x, y reminder.Reminder) int { return x.CreatedAt.Compare(y.CreatedAt) })
-	default:
-		slices.SortFunc(reminders, func(x, y reminder.Reminder) int { return x.DueAt.Compare(y.DueAt) })
 	}
 
 	if a.json {
@@ -168,14 +160,9 @@ func (c *ArchiveCmd) Run(a *app) error {
 	if err != nil {
 		return err
 	}
-	archived, err := cl.listArchive()
+	archived, total, err := cl.listArchive(c.Limit)
 	if err != nil {
 		return err
-	}
-
-	total := len(archived)
-	if c.Limit > 0 && total > c.Limit {
-		archived = archived[total-c.Limit:]
 	}
 
 	if a.json {
