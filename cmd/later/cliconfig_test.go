@@ -100,6 +100,19 @@ func TestLoadConfigFile_Missing(t *testing.T) {
 	}
 }
 
+func TestLoadConfigFile_ExampleParses(t *testing.T) {
+	values, err := loadConfigFile("config.example")
+	if err != nil {
+		t.Fatalf("loadConfigFile(config.example) error = %v", err)
+	}
+	if values["url"] != "https://later.domain.com" {
+		t.Errorf(`config.example url = %q, want "https://later.domain.com"`, values["url"])
+	}
+	if values["token"] != "tk_replace_this_with_a_real_token_at_least_16_chars" {
+		t.Errorf("config.example token = %q, want the placeholder token", values["token"])
+	}
+}
+
 func parseWithConfigFile(t *testing.T, args ...string) *CLI {
 	t.Helper()
 	resolver, err := configFileResolver()
