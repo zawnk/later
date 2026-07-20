@@ -126,7 +126,7 @@ func (s *Service) CreateReminder(in CreateInput) (*reminder.Reminder, error) {
 		DueAt:          dueAt,
 		CreatedAt:      s.now(),
 		OutboundTopics: in.OutboundTopics,
-		Tags:           in.Tags,
+		Tags:           reminder.DedupeTags(in.Tags),
 		Priority:       in.Priority,
 		Click:          in.Click,
 	}

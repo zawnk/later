@@ -17,7 +17,6 @@ func parseDirectives(text string) (cleanText string, tags []string, priority str
 
 	end := len(tokens)
 	var collectedTags []string
-	seenTags := make(map[string]struct{})
 	seenPriority := false
 
 loop:
@@ -25,11 +24,7 @@ loop:
 		tok := tokens[end-1]
 		switch {
 		case tagTokenRegex.MatchString(tok):
-			tag := tok[1:]
-			if _, dup := seenTags[tag]; !dup {
-				seenTags[tag] = struct{}{}
-				collectedTags = append(collectedTags, tag)
-			}
+			collectedTags = append(collectedTags, tok[1:])
 			end--
 		case strings.HasPrefix(tok, "!") && reminder.IsValidPriority(tok[1:]):
 			if seenPriority {
@@ -47,5 +42,5 @@ loop:
 		collectedTags[i], collectedTags[j] = collectedTags[j], collectedTags[i]
 	}
 
-	return strings.Join(tokens[:end], " "), collectedTags, priority, nil
+	return strings.Join(tokens[:end], " "), reminder.DedupeTags(collectedTags), priority, nil
 }

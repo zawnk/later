@@ -248,6 +248,31 @@ func TestCreateReminder_NotificationOptionsPassthrough(t *testing.T) {
 	}
 }
 
+func TestCreateReminder_DedupesTags(t *testing.T) {
+	store := &mockStore{}
+	svc := New(store)
+	svc.now = func() time.Time { return time.Date(2026, 6, 15, 9, 0, 0, 0, time.Local) }
+
+	in := CreateInput{
+		Text:           "buy cake in 3 days",
+		OutboundTopics: []string{"topic-a"},
+		Tags:           []string{"birthday", "partying_face", "birthday"},
+	}
+	rem, err := svc.CreateReminder(in)
+	if err != nil {
+		t.Fatalf("CreateReminder() error = %v", err)
+	}
+
+	want := []string{"birthday", "partying_face"}
+	if !slices.Equal(rem.Tags, want) {
+		t.Errorf("CreateReminder() Tags = %v, want %v (deduplicated, matching ntfy's inbound directive path)", rem.Tags, want)
+	}
+
+	if len(store.saved) != 1 || !slices.Equal(store.saved[0].Tags, want) {
+		t.Errorf("stored reminder tags = %v, want %v persisted deduplicated, not just returned", store.saved[0].Tags, want)
+	}
+}
+
 func TestCreateReminder_NotificationOptionsValidation(t *testing.T) {
 	tests := []struct {
 		name     string

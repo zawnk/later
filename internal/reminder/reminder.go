@@ -40,3 +40,19 @@ func IsValidPriority(p string) bool {
 	_, ok := validPriorities[p]
 	return ok
 }
+
+func DedupeTags(tags []string) []string {
+	if len(tags) == 0 {
+		return tags
+	}
+	seen := make(map[string]struct{}, len(tags))
+	result := make([]string, 0, len(tags))
+	for _, t := range tags {
+		if _, dup := seen[t]; dup {
+			continue
+		}
+		seen[t] = struct{}{}
+		result = append(result, t)
+	}
+	return result
+}
