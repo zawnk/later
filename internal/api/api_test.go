@@ -242,6 +242,13 @@ func TestCreateReminder_TopicScoping(t *testing.T) {
 			wantStatus: http.StatusForbidden,
 			wantTopics: nil,
 		},
+		{
+			name:       "unknown field in body is rejected",
+			token:      "valid-token",
+			body:       `{"text":"buy milk in 3 days","topic":"topic-a"}`,
+			wantStatus: http.StatusBadRequest,
+			wantTopics: nil,
+		},
 	}
 
 	for _, tt := range tests {
