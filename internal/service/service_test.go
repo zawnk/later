@@ -545,3 +545,67 @@ func TestPostpone(t *testing.T) {
 		})
 	}
 }
+
+func TestGet(t *testing.T) {
+	pending := reminder.Reminder{ID: "pending-1", Text: "buy milk", DueAt: time.Date(2026, 6, 20, 9, 0, 0, 0, time.UTC)}
+	archived := reminder.ArchivedReminder{
+		Reminder: reminder.Reminder{ID: "archived-1", Text: "call mom", DueAt: time.Date(2026, 6, 15, 9, 0, 0, 0, time.UTC)},
+		FiredAt:  time.Date(2026, 6, 15, 9, 1, 0, 0, time.UTC),
+	}
+	store := &mockStore{saved: []reminder.Reminder{pending}, archive: []reminder.ArchivedReminder{archived}}
+	svc := New(store)
+
+	t.Run("found pending", func(t *testing.T) {
+		gotPending, gotArchived, err := svc.Get("pending-1")
+
+		if err != nil {
+			t.Fatalf("Get() error = %v", err)
+		}
+
+		if gotArchived != nil {
+			t.Errorf("Get() archived = %+v, want nil", gotArchived)
+		}
+
+		if gotPending == nil || gotPending.ID != "pending-1" {
+			t.Errorf("Get() pending = %+v, want ID %q", gotPending, "pending-1")
+		}
+	})
+
+	t.Run("found archived", func(t *testing.T) {
+		gotPending, gotArchived, err := svc.Get("archived-1")
+
+		if err != nil {
+			t.Fatalf("Get() error = %v", err)
+		}
+
+		if gotPending != nil {
+			t.Errorf("Get() pending = %+v, want nil", gotPending)
+		}
+
+		if gotArchived == nil || gotArchived.ID != "archived-1" {
+			t.Errorf("Get() archived = %+v, want ID %q", gotArchived, "archived-1")
+		}
+	})
+
+	t.Run("not found returns all nils, no error", func(t *testing.T) {
+		gotPending, gotArchived, err := svc.Get("does-not-exist")
+
+		if err != nil {
+			t.Fatalf("Get() error = %v, want nil", err)
+		}
+
+		if gotPending != nil || gotArchived != nil {
+			t.Errorf("Get() = (%+v, %+v), want (nil, nil)", gotPending, gotArchived)
+		}
+	})
+
+	t.Run("archive load error propagates", func(t *testing.T) {
+		failingStore := &mockStore{archiveErr: errors.New("disk read failed")}
+		failingSvc := New(failingStore)
+		_, _, err := failingSvc.Get("anything")
+
+		if err == nil {
+			t.Fatal("Get() error = nil, want the archive load error surfaced")
+		}
+	})
+}

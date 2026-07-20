@@ -162,6 +162,27 @@ func (s *Service) Cancel(id string) (bool, error) {
 	return s.store.CancelReminder(id)
 }
 
+func (s *Service) Get(id string) (*reminder.Reminder, *reminder.ArchivedReminder, error) {
+	for _, r := range s.store.ListPendingReminders() {
+		if r.ID == id {
+			return &r, nil, nil
+		}
+	}
+
+	archive, err := s.store.ListArchive()
+
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, r := range archive {
+		if r.ID == id {
+			return nil, &r, nil
+		}
+	}
+
+	return nil, nil, nil
+}
+
 func (s *Service) Next() *reminder.Reminder {
 	pending := s.store.ListPendingReminders()
 	if len(pending) == 0 {
