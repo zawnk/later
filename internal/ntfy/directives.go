@@ -42,5 +42,5 @@ loop:
 		collectedTags[i], collectedTags[j] = collectedTags[j], collectedTags[i]
 	}
 
-	return strings.Join(tokens[:end], " "), reminder.DedupeTags(collectedTags), priority, nil
+	return strings.Join(tokens[:end], " "), reminder.DedupeStrings(collectedTags), priority, nil
 }

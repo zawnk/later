@@ -41,18 +41,18 @@ func IsValidPriority(p string) bool {
 	return ok
 }
 
-func DedupeTags(tags []string) []string {
-	if len(tags) == 0 {
-		return tags
+func DedupeStrings(items []string) []string {
+	if len(items) == 0 {
+		return items
 	}
-	seen := make(map[string]struct{}, len(tags))
-	result := make([]string, 0, len(tags))
-	for _, t := range tags {
-		if _, dup := seen[t]; dup {
+	seen := make(map[string]struct{}, len(items))
+	result := make([]string, 0, len(items))
+	for _, s := range items {
+		if _, dup := seen[s]; dup {
 			continue
 		}
-		seen[t] = struct{}{}
-		result = append(result, t)
+		seen[s] = struct{}{}
+		result = append(result, s)
 	}
 	return result
 }

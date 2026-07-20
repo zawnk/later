@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/zawnk/later/internal/config"
+	"github.com/zawnk/later/internal/reminder"
 	"github.com/zawnk/later/internal/service"
 )
 
@@ -201,6 +202,5 @@ func filterAllowed(requested, allowed []string) []string {
 			result = append(result, t)
 		}
 	}
-	slices.Sort(result)
-	return slices.Compact((result))
+	return reminder.DedupeStrings(result)
 }

@@ -57,6 +57,12 @@ func TestFilterAllowed(t *testing.T) {
 			allowed:   []string{},
 			grant:     nil,
 		},
+		{
+			name:      "requested order is preserved, not alphabetized",
+			requested: []string{"b", "a"},
+			allowed:   []string{"a", "b"},
+			grant:     []string{"b", "a"},
+		},
 	}
 
 	for _, tt := range tests {

@@ -35,7 +35,7 @@ func TestIsValidPriority(t *testing.T) {
 	}
 }
 
-func TestDedupeTags(t *testing.T) {
+func TestDedupeStrings(t *testing.T) {
 	tests := []struct {
 		name string
 		in   []string
@@ -51,8 +51,8 @@ func TestDedupeTags(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := DedupeTags(tt.in); !slices.Equal(got, tt.want) {
-				t.Errorf("DedupeTags(%v) = %v, want %v", tt.in, got, tt.want)
+			if got := DedupeStrings(tt.in); !slices.Equal(got, tt.want) {
+				t.Errorf("DedupeStrings(%v) = %v, want %v", tt.in, got, tt.want)
 			}
 		})
 	}
