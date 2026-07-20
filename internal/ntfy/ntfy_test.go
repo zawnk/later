@@ -371,6 +371,33 @@ func TestSendConfirmation(t *testing.T) {
 	}
 }
 
+func TestSendError(t *testing.T) {
+	srv, getReqs := recordingServer(t)
+	c := New(testConfig(srv.URL))
+
+	if err := c.sendError(context.Background(), "inbound-a", errors.New("no time information found")); err != nil {
+		t.Fatalf("sendError() error = %v", err)
+	}
+
+	reqs := getReqs()
+	if len(reqs) != 1 {
+		t.Fatalf("fake server saw %d requests, want 1", len(reqs))
+	}
+	req := reqs[0]
+
+	if req.path != "/inbound-a" {
+		t.Errorf("request path = %q, want %q", req.path, "/inbound-a")
+	}
+
+	if !strings.HasPrefix(req.body, "[later] error: ") {
+		t.Errorf("error body = %q, want the %q prefix (loop prevention + error marker)", req.body, "[later] error: ")
+	}
+
+	if !strings.Contains(req.body, "no time information found") {
+		t.Errorf("error body = %q, want it to contain the create error", req.body)
+	}
+}
+
 func TestSubscribe(t *testing.T) {
 	stream := strings.Join([]string{
 		`{"event":"keepalive","topic":"inbound-a"}`,
@@ -537,19 +564,20 @@ func TestRun_CreatesAndConfirms(t *testing.T) {
 	}
 }
 
-func TestRun_CreateFailureSendsNoConfirmation(t *testing.T) {
+func TestRun_CreateFailureSendsErrorFeedback(t *testing.T) {
 	var (
 		mu        sync.Mutex
 		delivered bool
-		posts     int
 	)
+	errored := make(chan recordedRequest, 4)
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
-			mu.Lock()
-			posts++
-			mu.Unlock()
+			body, _ := io.ReadAll(r.Body)
+			errored <- recordedRequest{method: r.Method, path: r.URL.Path, header: r.Header.Clone(), body: string(body)}
 			return
 		}
+
 		mu.Lock()
 		first := !delivered
 		delivered = true
@@ -588,17 +616,26 @@ func TestRun_CreateFailureSendsNoConfirmation(t *testing.T) {
 		t.Fatal("timed out waiting for the create callback")
 	}
 
+	select {
+	case req := <-errored:
+		if req.path != "/inbound-a" {
+			t.Errorf("error feedback path = %q, want /inbound-a (the message's own topic)", req.path)
+		}
+		if !strings.HasPrefix(req.body, "[later] error: ") {
+			t.Errorf("error feedback body = %q, want it to start with %q (loop prevention + error marker)", req.body, "[later] error: ")
+		}
+		if !strings.Contains(req.body, "no time information found") {
+			t.Errorf("error feedback body = %q, want it to contain the create error", req.body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the error-feedback POST")
+	}
+
 	cancel()
 	select {
 	case <-runDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return after ctx cancel")
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	if posts != 0 {
-		t.Errorf("server saw %d confirmation POSTs after a failed create, want 0", posts)
 	}
 }
 

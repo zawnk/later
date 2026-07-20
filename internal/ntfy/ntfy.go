@@ -211,6 +211,9 @@ func (c *Client) consume(ctx context.Context, msgs <-chan subscriptionMessage, c
 		rem, err := create(msg.Text, msg.Outbound)
 		if err != nil {
 			slog.Error("failed to create reminder from ntfy", "err", err)
+			if sendErr := c.sendError(ctx, msg.Inbound, err); sendErr != nil {
+				slog.Error("failed to send error feedback", "err", sendErr)
+			}
 			continue
 		}
 		slog.Info("reminder created via ntfy", "topic", rem.OutboundTopics, "id", rem.ID, "due", rem.DueAt)
@@ -302,6 +305,11 @@ func (c *Client) resolveOutbound(topic string) []string {
 
 func (c *Client) sendConfirmation(ctx context.Context, topic string, r *reminder.Reminder) error {
 	msg := fmt.Sprintf("Reminder set for %s ✅ (%s)", r.DueAt.Format("Mon Jan 2, 15:04"), r.ID)
+	return c.sendSystem(ctx, msg, topic)
+}
+
+func (c *Client) sendError(ctx context.Context, topic string, createErr error) error {
+	msg := fmt.Sprintf("error: %s", createErr)
 	return c.sendSystem(ctx, msg, topic)
 }
 
