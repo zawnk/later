@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -117,16 +118,28 @@ func (c *client) create(req createRequest) (*reminder.Reminder, error) {
 	return &rem, nil
 }
 
-func (c *client) listPending() ([]reminder.Reminder, error) {
+func (c *client) listPending(sortBy string) ([]reminder.Reminder, error) {
 	var reminders []reminder.Reminder
-	err := c.getJSON("/reminders", &reminders)
+	err := c.getJSON("/reminders?sort="+url.QueryEscape(sortBy), &reminders)
 	return reminders, err
 }
 
-func (c *client) listArchive() ([]reminder.ArchivedReminder, error) {
-	var archived []reminder.ArchivedReminder
-	err := c.getJSON("/reminders/archive", &archived)
-	return archived, err
+func (c *client) listArchive(limit int) (archived []reminder.ArchivedReminder, total int, err error) {
+	resp, err := c.do(http.MethodGet, fmt.Sprintf("/reminders/archive?limit=%d", limit), nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+
+	if err := json.NewDecoder(resp.Body).Decode(&archived); err != nil {
+		return nil, 0, fmt.Errorf("decoding response: %w", err)
+	}
+
+	total = len(archived)
+	if t, err := strconv.Atoi(resp.Header.Get("X-Total-Count")); err == nil {
+		total = t
+	}
+	return archived, total, nil
 }
 
 func (c *client) next() (*reminder.Reminder, error) {
