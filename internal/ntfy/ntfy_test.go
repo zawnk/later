@@ -68,6 +68,8 @@ func testConfig(serverURL string) *config.Config {
 type createCall struct {
 	text     string
 	outbound []string
+	tags     []string
+	priority string
 }
 
 func TestResolveOutbound(t *testing.T) {
@@ -515,8 +517,8 @@ func TestRun_CreatesAndConfirms(t *testing.T) {
 	c.reconnectWait = time.Millisecond
 
 	created := make(chan createCall, 4)
-	create := func(text string, outbound []string) (*reminder.Reminder, error) {
-		created <- createCall{text: text, outbound: outbound}
+	create := func(msg ParsedInboundMessage) (*reminder.Reminder, error) {
+		created <- createCall{text: msg.Text, outbound: msg.Outbound, tags: msg.Tags, priority: msg.Priority}
 		return &reminder.Reminder{ID: "rem-1", DueAt: time.Date(2026, 6, 15, 9, 0, 0, 0, time.UTC)}, nil
 	}
 
@@ -564,6 +566,145 @@ func TestRun_CreatesAndConfirms(t *testing.T) {
 	}
 }
 
+func TestRun_CreatesWithDirectives(t *testing.T) {
+	var (
+		mu        sync.Mutex
+		delivered bool
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			return
+		}
+
+		mu.Lock()
+		first := !delivered
+		delivered = true
+		mu.Unlock()
+		if first {
+			_, _ = io.WriteString(w, `{"event":"message","topic":"inbound-a","message":"buy milk in 3 days #groceries !high"}`+"\n")
+		}
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+
+	c := New(testConfig(srv.URL))
+	c.reconnectWait = time.Millisecond
+
+	created := make(chan createCall, 4)
+	create := func(msg ParsedInboundMessage) (*reminder.Reminder, error) {
+		created <- createCall{text: msg.Text, outbound: msg.Outbound, tags: msg.Tags, priority: msg.Priority}
+		return &reminder.Reminder{ID: "rem-1"}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		c.Run(ctx, create)
+	}()
+
+	select {
+	case call := <-created:
+		if call.text != "buy milk in 3 days" {
+			t.Errorf("create text = %q, want the directives stripped: %q", call.text, "buy milk in 3 days")
+		}
+		if !slices.Equal(call.tags, []string{"groceries"}) {
+			t.Errorf("create tags = %v, want %v", call.tags, []string{"groceries"})
+		}
+		if call.priority != "high" {
+			t.Errorf("create priority = %q, want %q", call.priority, "high")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the create callback")
+	}
+
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
+func TestRun_ConflictingPriorityDirectivesSendsErrorFeedback(t *testing.T) {
+	var (
+		mu        sync.Mutex
+		delivered bool
+	)
+	errored := make(chan recordedRequest, 4)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			body, _ := io.ReadAll(r.Body)
+			errored <- recordedRequest{method: r.Method, path: r.URL.Path, header: r.Header.Clone(), body: string(body)}
+			return
+		}
+
+		mu.Lock()
+		first := !delivered
+		delivered = true
+		mu.Unlock()
+		if first {
+			_, _ = io.WriteString(w, `{"event":"message","topic":"inbound-a","message":"buy milk in 3 days !high !low"}`+"\n")
+		}
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+
+	c := New(testConfig(srv.URL))
+	c.reconnectWait = time.Millisecond
+
+	created := make(chan createCall, 4)
+	create := func(msg ParsedInboundMessage) (*reminder.Reminder, error) {
+		created <- createCall{text: msg.Text, outbound: msg.Outbound, tags: msg.Tags, priority: msg.Priority}
+		return &reminder.Reminder{ID: "rem-1"}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		c.Run(ctx, create)
+	}()
+
+	select {
+	case req := <-errored:
+		if req.path != "/inbound-a" {
+			t.Errorf("error feedback path = %q, want /inbound-a (the message's own topic)", req.path)
+		}
+		if !strings.HasPrefix(req.body, "[later] error: ") {
+			t.Errorf("error feedback body = %q, want it to start with %q", req.body, "[later] error: ")
+		}
+		if !strings.Contains(req.body, "multiple priority directives") {
+			t.Errorf("error feedback body = %q, want it to mention the conflict", req.body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the error-feedback POST")
+	}
+
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+
+	if len(created) != 0 {
+		t.Errorf("create was called %d times, want 0 -- a directive conflict must be rejected before create is ever invoked", len(created))
+	}
+}
+
 func TestRun_CreateFailureSendsErrorFeedback(t *testing.T) {
 	var (
 		mu        sync.Mutex
@@ -596,8 +737,8 @@ func TestRun_CreateFailureSendsErrorFeedback(t *testing.T) {
 	c.reconnectWait = time.Millisecond
 
 	created := make(chan createCall, 4)
-	create := func(text string, outbound []string) (*reminder.Reminder, error) {
-		created <- createCall{text: text, outbound: outbound}
+	create := func(msg ParsedInboundMessage) (*reminder.Reminder, error) {
+		created <- createCall{text: msg.Text, outbound: msg.Outbound, tags: msg.Tags, priority: msg.Priority}
 		return nil, errors.New("no time information found")
 	}
 
@@ -657,8 +798,8 @@ func TestRun_ReconnectsAfterStreamDrops(t *testing.T) {
 	c.reconnectWait = time.Millisecond
 
 	created := make(chan createCall, 16)
-	create := func(text string, outbound []string) (*reminder.Reminder, error) {
-		created <- createCall{text: text, outbound: outbound}
+	create := func(msg ParsedInboundMessage) (*reminder.Reminder, error) {
+		created <- createCall{text: msg.Text, outbound: msg.Outbound, tags: msg.Tags, priority: msg.Priority}
 		return &reminder.Reminder{ID: "rem-1"}, nil
 	}
 
@@ -726,8 +867,8 @@ func TestRun_ResubscribesWithSince(t *testing.T) {
 	c.reconnectWait = time.Millisecond
 
 	created := make(chan createCall, 64)
-	create := func(text string, outbound []string) (*reminder.Reminder, error) {
-		created <- createCall{text: text, outbound: outbound}
+	create := func(msg ParsedInboundMessage) (*reminder.Reminder, error) {
+		created <- createCall{text: msg.Text, outbound: msg.Outbound, tags: msg.Tags, priority: msg.Priority}
 		return &reminder.Reminder{ID: "rem-1"}, nil
 	}
 
@@ -783,8 +924,8 @@ func TestRun_NoInboundTopics(t *testing.T) {
 	cancel()
 
 	created := make(chan createCall, 1)
-	create := func(text string, outbound []string) (*reminder.Reminder, error) {
-		created <- createCall{text: text, outbound: outbound}
+	create := func(msg ParsedInboundMessage) (*reminder.Reminder, error) {
+		created <- createCall{text: msg.Text, outbound: msg.Outbound, tags: msg.Tags, priority: msg.Priority}
 		return nil, nil
 	}
 

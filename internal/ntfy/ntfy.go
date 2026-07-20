@@ -23,6 +23,13 @@ type subscriptionMessage struct {
 	Inbound  string
 }
 
+type ParsedInboundMessage struct {
+	Text     string
+	Outbound []string
+	Tags     []string
+	Priority string
+}
+
 type ntfyMessage struct {
 	ID      string `json:"id"`
 	Time    int64  `json:"time"`
@@ -156,7 +163,7 @@ func (c *Client) sendToTopic(ctx context.Context, text, topic string, mods ...nt
 	return nil
 }
 
-func (c *Client) Run(ctx context.Context, create func(text string, outbound []string) (*reminder.Reminder, error)) {
+func (c *Client) Run(ctx context.Context, create func(ParsedInboundMessage) (*reminder.Reminder, error)) {
 	if len(c.cfg.Inbound) == 0 {
 		slog.Info("no inbound topics configured, ntfy subscriber disabled")
 		<-ctx.Done()
@@ -206,9 +213,18 @@ func (c *Client) Run(ctx context.Context, create func(text string, outbound []st
 	}
 }
 
-func (c *Client) consume(ctx context.Context, msgs <-chan subscriptionMessage, create func(text string, outbound []string) (*reminder.Reminder, error)) {
+func (c *Client) consume(ctx context.Context, msgs <-chan subscriptionMessage, create func(ParsedInboundMessage) (*reminder.Reminder, error)) {
 	for msg := range msgs {
-		rem, err := create(msg.Text, msg.Outbound)
+		text, tags, priority, err := parseDirectives(msg.Text)
+		if err != nil {
+			slog.Error("failed to parse inbound directives", "err", err)
+			if sendErr := c.sendError(ctx, msg.Inbound, err); sendErr != nil {
+				slog.Error("failed to send error feedback", "err", sendErr)
+			}
+			continue
+		}
+
+		rem, err := create(ParsedInboundMessage{Text: text, Outbound: msg.Outbound, Tags: tags, Priority: priority})
 		if err != nil {
 			slog.Error("failed to create reminder from ntfy", "err", err)
 			if sendErr := c.sendError(ctx, msg.Inbound, err); sendErr != nil {
