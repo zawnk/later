@@ -16,6 +16,7 @@ import (
 	"github.com/zawnk/later/internal/api"
 	"github.com/zawnk/later/internal/config"
 	"github.com/zawnk/later/internal/ntfy"
+	"github.com/zawnk/later/internal/reminder"
 	"github.com/zawnk/later/internal/scheduler"
 	"github.com/zawnk/later/internal/service"
 	"github.com/zawnk/later/internal/store"
@@ -48,32 +49,14 @@ func main() {
 	ntfyClient := ntfy.New(cfg)
 
 	var wg sync.WaitGroup
-	// wire ntfy inbound subscriber
+
 	if len(cfg.Inbound) > 0 {
-		msgs := make(chan ntfy.SubscriptionMessage, 32)
-
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ntfyClient.Run(ctx, msgs)
-		}()
-
-		wg.Add(1)
-		go func() {
-			// TODO: this eventually has to be refactored in the ntfy pkg for clearer structure
-			defer wg.Done()
-			for msg := range msgs {
-				rem, err := svc.CreateReminder(service.CreateInput{Text: msg.Text, OutboundTopics: msg.Outbound})
-				if err != nil {
-					slog.Error("failed to create reminder from ntfy", "err", err)
-					continue
-				}
-				slog.Info("reminder created via ntfy", "topic", rem.OutboundTopics, "id", rem.ID, "due", rem.DueAt)
-
-				if err := ntfyClient.SendConfirmation(ctx, msg.Inbound, rem); err != nil {
-					slog.Error("failed to send confirmation", "err", err)
-				}
-			}
+			ntfyClient.Run(ctx, func(text string, outbound []string) (*reminder.Reminder, error) {
+				return svc.CreateReminder(service.CreateInput{Text: text, OutboundTopics: outbound})
+			})
 		}()
 	}
 

@@ -10,13 +10,14 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/zawnk/later/internal/config"
 	"github.com/zawnk/later/internal/reminder"
 )
 
-type SubscriptionMessage struct {
+type subscriptionMessage struct {
 	Text     string
 	Outbound []string
 	Inbound  string
@@ -155,15 +156,27 @@ func (c *Client) sendToTopic(ctx context.Context, text, topic string, mods ...nt
 	return nil
 }
 
-func (c *Client) Run(ctx context.Context, incomingMsgs chan<- SubscriptionMessage) {
-	defer close(incomingMsgs)
-
+func (c *Client) Run(ctx context.Context, create func(text string, outbound []string) (*reminder.Reminder, error)) {
 	if len(c.cfg.Inbound) == 0 {
 		slog.Info("no inbound topics configured, ntfy subscriber disabled")
 		<-ctx.Done()
 		slog.Info("ntfy subscriber stopped")
 		return
 	}
+
+	msgs := make(chan subscriptionMessage, 32)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		c.consume(ctx, msgs, create)
+	}()
+
+	defer func() {
+		close(msgs)
+		wg.Wait()
+	}()
 
 	topics := make([]string, len(c.cfg.Inbound))
 	for i, inbound := range c.cfg.Inbound {
@@ -173,7 +186,7 @@ func (c *Client) Run(ctx context.Context, incomingMsgs chan<- SubscriptionMessag
 
 	for {
 		slog.Info("subscribing to ntfy topics", "topics", combined)
-		err := c.subscribe(ctx, combined, incomingMsgs)
+		err := c.subscribe(ctx, combined, msgs)
 
 		if ctx.Err() != nil {
 			slog.Info("shutdown signal received- ntfy subscriber stopped")
@@ -191,7 +204,22 @@ func (c *Client) Run(ctx context.Context, incomingMsgs chan<- SubscriptionMessag
 	}
 }
 
-func (c *Client) subscribe(ctx context.Context, topics string, incomingMsgs chan<- SubscriptionMessage) error {
+func (c *Client) consume(ctx context.Context, msgs <-chan subscriptionMessage, create func(text string, outbound []string) (*reminder.Reminder, error)) {
+	for msg := range msgs {
+		rem, err := create(msg.Text, msg.Outbound)
+		if err != nil {
+			slog.Error("failed to create reminder from ntfy", "err", err)
+			continue
+		}
+		slog.Info("reminder created via ntfy", "topic", rem.OutboundTopics, "id", rem.ID, "due", rem.DueAt)
+
+		if err := c.sendConfirmation(ctx, msg.Inbound, rem); err != nil {
+			slog.Error("failed to send confirmation", "err", err)
+		}
+	}
+}
+
+func (c *Client) subscribe(ctx context.Context, topics string, incomingMsgs chan<- subscriptionMessage) error {
 	url := fmt.Sprintf("%s/%s/json", strings.TrimRight(c.cfg.Ntfy.Server, "/"), topics)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -239,7 +267,7 @@ func (c *Client) subscribe(ctx context.Context, topics string, incomingMsgs chan
 			slog.Warn("dropping message on unexpected topic", "topic", msg.Topic)
 			continue
 		}
-		sub := SubscriptionMessage{Text: msg.Message, Outbound: outbound, Inbound: msg.Topic}
+		sub := subscriptionMessage{Text: msg.Message, Outbound: outbound, Inbound: msg.Topic}
 
 		select {
 		case incomingMsgs <- sub:
@@ -260,7 +288,7 @@ func (c *Client) resolveOutbound(topic string) []string {
 	return nil
 }
 
-func (c *Client) SendConfirmation(ctx context.Context, topic string, r *reminder.Reminder) error {
+func (c *Client) sendConfirmation(ctx context.Context, topic string, r *reminder.Reminder) error {
 	msg := fmt.Sprintf("Reminder set for %s ✅ (%s)", r.DueAt.Format("Mon Jan 2, 15:04"), r.ID)
 	return c.sendSystem(ctx, msg, topic)
 }

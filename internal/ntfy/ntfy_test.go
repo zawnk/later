@@ -2,6 +2,7 @@ package ntfy
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -62,6 +63,11 @@ func testConfig(serverURL string) *config.Config {
 			{Topic: "inbound-b", Outbound: []string{"out-3"}},
 		},
 	}
+}
+
+type createCall struct {
+	text     string
+	outbound []string
 }
 
 func TestResolveOutbound(t *testing.T) {
@@ -334,8 +340,8 @@ func TestSendConfirmation(t *testing.T) {
 		ID:    "abc123",
 		DueAt: time.Date(2026, 6, 15, 9, 0, 0, 0, time.UTC),
 	}
-	if err := c.SendConfirmation(context.Background(), "inbound-a", r); err != nil {
-		t.Fatalf("SendConfirmation() error = %v", err)
+	if err := c.sendConfirmation(context.Background(), "inbound-a", r); err != nil {
+		t.Fatalf("sendConfirmation() error = %v", err)
 	}
 
 	reqs := getReqs()
@@ -390,13 +396,13 @@ func TestSubscribe(t *testing.T) {
 
 	c := New(testConfig(srv.URL))
 
-	msgs := make(chan SubscriptionMessage, 16)
+	msgs := make(chan subscriptionMessage, 16)
 	if err := c.subscribe(context.Background(), "inbound-a,inbound-b", msgs); err != nil {
 		t.Fatalf("subscribe() error = %v", err)
 	}
 	close(msgs)
 
-	var got []SubscriptionMessage
+	var got []subscriptionMessage
 	for m := range msgs {
 		got = append(got, m)
 	}
@@ -434,7 +440,7 @@ func TestSubscribe_ServerError(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := New(testConfig(srv.URL))
-	msgs := make(chan SubscriptionMessage, 1)
+	msgs := make(chan subscriptionMessage, 1)
 
 	err := c.subscribe(context.Background(), "inbound-a", msgs)
 	if err == nil {
@@ -450,10 +456,159 @@ func TestSubscribe_ServerError(t *testing.T) {
 	}
 }
 
+func TestRun_CreatesAndConfirms(t *testing.T) {
+	var (
+		mu        sync.Mutex
+		delivered bool
+	)
+	confirmed := make(chan recordedRequest, 4)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			body, _ := io.ReadAll(r.Body)
+			confirmed <- recordedRequest{method: r.Method, path: r.URL.Path, header: r.Header.Clone(), body: string(body)}
+			return
+		}
+
+		mu.Lock()
+		first := !delivered
+		delivered = true
+		mu.Unlock()
+		if first {
+			_, _ = io.WriteString(w, `{"event":"message","topic":"inbound-a","message":"buy milk in 3 days"}`+"\n")
+		}
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+
+	c := New(testConfig(srv.URL))
+	c.reconnectWait = time.Millisecond
+
+	created := make(chan createCall, 4)
+	create := func(text string, outbound []string) (*reminder.Reminder, error) {
+		created <- createCall{text: text, outbound: outbound}
+		return &reminder.Reminder{ID: "rem-1", DueAt: time.Date(2026, 6, 15, 9, 0, 0, 0, time.UTC)}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		c.Run(ctx, create)
+	}()
+
+	select {
+	case call := <-created:
+		if call.text != "buy milk in 3 days" {
+			t.Errorf("create text = %q, want %q", call.text, "buy milk in 3 days")
+		}
+		if !slices.Equal(call.outbound, []string{"out-1", "out-2"}) {
+			t.Errorf("create outbound = %v, want inbound-a's configured list", call.outbound)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the create callback")
+	}
+
+	select {
+	case conf := <-confirmed:
+		if conf.path != "/inbound-a" {
+			t.Errorf("confirmation path = %q, want /inbound-a (the message's own topic)", conf.path)
+		}
+		if !strings.HasPrefix(conf.body, "[later] ") {
+			t.Errorf("confirmation body = %q, want the %q prefix (loop prevention)", conf.body, "[later] ")
+		}
+		if !strings.Contains(conf.body, "rem-1") {
+			t.Errorf("confirmation body = %q, want it to contain the created reminder's id", conf.body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the confirmation POST")
+	}
+
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
+func TestRun_CreateFailureSendsNoConfirmation(t *testing.T) {
+	var (
+		mu        sync.Mutex
+		delivered bool
+		posts     int
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			mu.Lock()
+			posts++
+			mu.Unlock()
+			return
+		}
+		mu.Lock()
+		first := !delivered
+		delivered = true
+		mu.Unlock()
+		if first {
+			_, _ = io.WriteString(w, `{"event":"message","topic":"inbound-a","message":"gibberish"}`+"\n")
+		}
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+
+	c := New(testConfig(srv.URL))
+	c.reconnectWait = time.Millisecond
+
+	created := make(chan createCall, 4)
+	create := func(text string, outbound []string) (*reminder.Reminder, error) {
+		created <- createCall{text: text, outbound: outbound}
+		return nil, errors.New("no time information found")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		c.Run(ctx, create)
+	}()
+
+	select {
+	case <-created:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the create callback")
+	}
+
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if posts != 0 {
+		t.Errorf("server saw %d confirmation POSTs after a failed create, want 0", posts)
+	}
+}
+
 func TestRun_ReconnectsAfterStreamDrops(t *testing.T) {
 	var mu sync.Mutex
 	connections := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			return
+		}
 		mu.Lock()
 		connections++
 		mu.Unlock()
@@ -464,48 +619,43 @@ func TestRun_ReconnectsAfterStreamDrops(t *testing.T) {
 	c := New(testConfig(srv.URL))
 	c.reconnectWait = time.Millisecond
 
+	created := make(chan createCall, 16)
+	create := func(text string, outbound []string) (*reminder.Reminder, error) {
+		created <- createCall{text: text, outbound: outbound}
+		return &reminder.Reminder{ID: "rem-1"}, nil
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	msgs := make(chan SubscriptionMessage)
 	runDone := make(chan struct{})
 	go func() {
 		defer close(runDone)
-		c.Run(ctx, msgs)
+		c.Run(ctx, create)
 	}()
 
 	for i := range 2 {
 		select {
-		case m := <-msgs:
-			if m.Text != "hi" {
-				t.Errorf("message %d Text = %q, want %q", i, m.Text, "hi")
+		case call := <-created:
+			if call.text != "hi" {
+				t.Errorf("create %d text = %q, want %q", i, call.text, "hi")
 			}
 		case <-time.After(5 * time.Second):
-			t.Fatalf("timed out waiting for message %d -- Run did not reconnect?", i)
+			t.Fatalf("timed out waiting for create %d -- Run did not reconnect?", i)
 		}
 	}
 
 	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
 
-	for {
-		select {
-		case _, ok := <-msgs:
-			if !ok {
-				select {
-				case <-time.After(5 * time.Second):
-					t.Fatal("Run did not return after its channel closed")
-				case <-runDone:
-				}
-				mu.Lock()
-				defer mu.Unlock()
-				if connections < 2 {
-					t.Errorf("server saw %d connections, want at least 2 (reconnect)", connections)
-				}
-				return
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatal("Run did not close the message channel after ctx cancel")
-		}
+	mu.Lock()
+	defer mu.Unlock()
+	if connections < 2 {
+		t.Errorf("server saw %d subscribe connections, want at least 2 (reconnect)", connections)
 	}
 }
 
@@ -518,11 +668,16 @@ func TestRun_NoInboundTopics(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	msgs := make(chan SubscriptionMessage)
+	created := make(chan createCall, 1)
+	create := func(text string, outbound []string) (*reminder.Reminder, error) {
+		created <- createCall{text: text, outbound: outbound}
+		return nil, nil
+	}
+
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		c.Run(ctx, msgs)
+		c.Run(ctx, create)
 	}()
 
 	select {
@@ -531,8 +686,8 @@ func TestRun_NoInboundTopics(t *testing.T) {
 	case <-done:
 	}
 
-	if _, ok := <-msgs; ok {
-		t.Error("received a message on the channel, want it closed with no messages")
+	if len(created) != 0 {
+		t.Error("create callback was called, want no calls without inbound topics")
 	}
 
 	if reqs := getReqs(); len(reqs) != 0 {
