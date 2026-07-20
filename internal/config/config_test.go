@@ -183,6 +183,19 @@ func TestValidate(t *testing.T) {
 			},
 			wantErr: "would create a notification loop",
 		},
+
+		{
+			name:    "duplicate topic within a token's outbound list is rejected",
+			mutate:  func(c *Config) { c.AuthTokens[0].Outbound = []string{"topic-a", "topic-a"} },
+			wantErr: "duplicate topic",
+		},
+		{
+			name: "duplicate topic within an inbound's outbound list is rejected",
+			mutate: func(c *Config) {
+				c.Inbound = []Inbound{{Topic: "inbound-topic", Outbound: []string{"out-topic", "out-topic"}}}
+			},
+			wantErr: "duplicate topic",
+		},
 	}
 
 	for _, tt := range tests {

@@ -110,6 +110,9 @@ func (c *Config) validate() error {
 		if len(t.Outbound) == 0 {
 			return fmt.Errorf("auth_tokens[%d].outbound: required (topics this token may publish to)", i)
 		}
+		if dup, found := firstDuplicate(t.Outbound); found {
+			return fmt.Errorf("auth_tokens[%d].outbound: duplicate topic %q", i, dup)
+		}
 		if t.DefaultOutbound != "" && !slices.Contains(t.Outbound, t.DefaultOutbound) {
 			return fmt.Errorf("auth_tokens[%d].default_outbound %q: must be one of the token's outbound topics", i, t.DefaultOutbound)
 		}
@@ -127,6 +130,9 @@ func (c *Config) validate() error {
 
 		if len(in.Outbound) == 0 {
 			return fmt.Errorf("inbound[%d].outbound: required (topics reminders from %q are published to)", i, in.Topic)
+		}
+		if dup, found := firstDuplicate(in.Outbound); found {
+			return fmt.Errorf("inbound[%d].outbound: duplicate topic %q", i, dup)
 		}
 	}
 
@@ -146,4 +152,17 @@ func (c *Config) validate() error {
 	}
 
 	return nil
+}
+
+// firstDuplicate returns the first list entry that also appears earlier in
+// the list, so validate() can point at the offending topic in its error.
+func firstDuplicate(list []string) (string, bool) {
+	seen := make(map[string]struct{}, len(list))
+	for _, s := range list {
+		if _, ok := seen[s]; ok {
+			return s, true
+		}
+		seen[s] = struct{}{}
+	}
+	return "", false
 }
