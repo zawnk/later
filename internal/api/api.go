@@ -36,9 +36,13 @@ func (a *API) Routes() *http.ServeMux {
 
 func (a *API) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		verifiedToken, authorized := a.tokenCompare(token)
+		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !ok {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 
+		verifiedToken, authorized := a.tokenCompare(token)
 		if !authorized {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -95,7 +99,7 @@ func (a *API) createReminder(w http.ResponseWriter, r *http.Request) {
 		if token.DefaultOutbound != "" {
 			outbound = []string{token.DefaultOutbound}
 		} else {
-			outbound = token.Outbound
+			outbound = slices.Clone(token.Outbound)
 		}
 	} else {
 		outbound = filterAllowed(outbound, token.Outbound)

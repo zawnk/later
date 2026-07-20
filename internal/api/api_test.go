@@ -146,6 +146,7 @@ func TestAuth(t *testing.T) {
 		{"correct token is accepted", "Bearer valid-token", http.StatusOK, true},
 		{"Bearer prefix with empty token is rejected", "Bearer ", http.StatusUnauthorized, false},
 		{"header without the Bearer prefix is treated as a literal (wrong) token", "NotBearer valid-token", http.StatusUnauthorized, false},
+		{"bare valid token without the Bearer scheme is rejected", "valid-token", http.StatusUnauthorized, false},
 	}
 
 	for _, tt := range tests {
