@@ -17,16 +17,22 @@ func writeJsonResponse(w http.ResponseWriter, status int, v any) {
 	}
 }
 
+func writeJSONError(w http.ResponseWriter, message string, status int) {
+	writeJsonResponse(w, status, struct {
+		Error string `json:"error"`
+	}{Error: message})
+}
+
 func writeServiceError(w http.ResponseWriter, err error, logMsg string) {
 	switch {
 	case errors.Is(err, service.ErrInvalidInput):
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeJSONError(w, err.Error(), http.StatusBadRequest)
 	case errors.Is(err, service.ErrNotFound):
-		http.Error(w, err.Error(), http.StatusNotFound)
+		writeJSONError(w, err.Error(), http.StatusNotFound)
 	case errors.Is(err, service.ErrStillPending):
-		http.Error(w, err.Error(), http.StatusConflict)
+		writeJSONError(w, err.Error(), http.StatusConflict)
 	default:
 		slog.Error(logMsg, "err", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeJSONError(w, "internal server error", http.StatusInternalServerError)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zawnk/later/internal/config"
 	"github.com/zawnk/later/internal/reminder"
@@ -184,13 +185,17 @@ func TestAuth(t *testing.T) {
 }
 
 type stubStore struct {
-	saved []reminder.Reminder
+	saved   []reminder.Reminder
+	pending []reminder.Reminder
+	archive []reminder.ArchivedReminder
 }
 
-func (s *stubStore) SaveReminder(r reminder.Reminder) error            { s.saved = append(s.saved, r); return nil }
-func (s *stubStore) ListPendingReminders() []reminder.Reminder         { return nil }
-func (s *stubStore) ListArchive() ([]reminder.ArchivedReminder, error) { return nil, nil }
-func (s *stubStore) CancelReminder(id string) (bool, error)            { return false, nil }
+func (s *stubStore) SaveReminder(r reminder.Reminder) error    { s.saved = append(s.saved, r); return nil }
+func (s *stubStore) ListPendingReminders() []reminder.Reminder { return s.pending }
+func (s *stubStore) ListArchive() ([]reminder.ArchivedReminder, error) {
+	return s.archive, nil
+}
+func (s *stubStore) CancelReminder(id string) (bool, error) { return false, nil }
 
 func TestCreateReminder_TopicScoping(t *testing.T) {
 	cfg := &config.Config{
@@ -297,4 +302,231 @@ func TestCreateReminder_TopicScoping(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWriteJSONError(t *testing.T) {
+	rr := httptest.NewRecorder()
+	writeJSONError(rr, "reminder not found", http.StatusNotFound)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusNotFound)
+	}
+
+	if got := rr.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", got)
+	}
+
+	var body struct {
+		Error string `json:"error"`
+	}
+
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("decoding error body: %v (body: %s)", err, rr.Body.String())
+	}
+
+	if body.Error != "reminder not found" {
+		t.Errorf("error field = %q, want %q", body.Error, "reminder not found")
+	}
+}
+
+func TestListArchive_Limit(t *testing.T) {
+	cfg := &config.Config{
+		AuthTokens: []config.Token{{Token: "valid-token", Outbound: []string{"topic-a"}}},
+	}
+	archive := []reminder.ArchivedReminder{
+		{Reminder: reminder.Reminder{ID: "1", Text: "one"}},
+		{Reminder: reminder.Reminder{ID: "2", Text: "two"}},
+		{Reminder: reminder.Reminder{ID: "3", Text: "three"}},
+	}
+
+	tests := []struct {
+		name       string
+		query      string
+		wantStatus int
+		wantIDs    []string
+	}{
+		{"no limit param returns everything", "", http.StatusOK, []string{"1", "2", "3"}},
+		{"limit narrower than total returns the most recent N, oldest-first", "?limit=2", http.StatusOK, []string{"2", "3"}},
+		{"limit wider than total returns everything", "?limit=10", http.StatusOK, []string{"1", "2", "3"}},
+		{"limit=0 means no limit", "?limit=0", http.StatusOK, []string{"1", "2", "3"}},
+		{"negative limit is rejected", "?limit=-1", http.StatusBadRequest, nil},
+		{"non-numeric limit is rejected", "?limit=abc", http.StatusBadRequest, nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &stubStore{archive: archive}
+			a := New(cfg, service.New(store))
+
+			req := httptest.NewRequest(http.MethodGet, "/reminders/archive"+tt.query, nil)
+			req.Header.Set("Authorization", "Bearer valid-token")
+			rr := httptest.NewRecorder()
+			a.Routes().ServeHTTP(rr, req)
+
+			if rr.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d (body: %s)", rr.Code, tt.wantStatus, rr.Body.String())
+			}
+
+			if tt.wantIDs == nil {
+				return
+			}
+
+			var got []reminder.ArchivedReminder
+
+			if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+				t.Fatalf("decoding response: %v", err)
+			}
+			var gotIDs []string
+			for _, r := range got {
+				gotIDs = append(gotIDs, r.ID)
+			}
+
+			if !slices.Equal(gotIDs, tt.wantIDs) {
+				t.Errorf("archive IDs = %v, want %v", gotIDs, tt.wantIDs)
+			}
+		})
+	}
+}
+
+func TestGetReminder(t *testing.T) {
+	cfg := &config.Config{
+		AuthTokens: []config.Token{{Token: "valid-token", Outbound: []string{"topic-a"}}},
+	}
+	store := &stubStore{
+		pending: []reminder.Reminder{{ID: "pending-1", Text: "buy milk"}},
+		archive: []reminder.ArchivedReminder{{Reminder: reminder.Reminder{ID: "archived-1", Text: "call mom"}}},
+	}
+	a := New(cfg, service.New(store))
+
+	t.Run("finds a pending reminder", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/reminders/pending-1", nil)
+		req.Header.Set("Authorization", "Bearer valid-token")
+		rr := httptest.NewRecorder()
+		a.Routes().ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d (body: %s)", rr.Code, http.StatusOK, rr.Body.String())
+		}
+		var rem reminder.Reminder
+
+		if err := json.NewDecoder(rr.Body).Decode(&rem); err != nil {
+			t.Fatalf("decoding response: %v", err)
+		}
+
+		if rem.ID != "pending-1" {
+			t.Errorf("ID = %q, want %q", rem.ID, "pending-1")
+		}
+	})
+
+	t.Run("finds an archived reminder", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/reminders/archived-1", nil)
+		req.Header.Set("Authorization", "Bearer valid-token")
+		rr := httptest.NewRecorder()
+		a.Routes().ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d (body: %s)", rr.Code, http.StatusOK, rr.Body.String())
+		}
+		var rem reminder.ArchivedReminder
+
+		if err := json.NewDecoder(rr.Body).Decode(&rem); err != nil {
+			t.Fatalf("decoding response: %v", err)
+		}
+
+		if rem.ID != "archived-1" {
+			t.Errorf("ID = %q, want %q", rem.ID, "archived-1")
+		}
+	})
+
+	t.Run("unknown id is a 404", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/reminders/does-not-exist", nil)
+		req.Header.Set("Authorization", "Bearer valid-token")
+		rr := httptest.NewRecorder()
+		a.Routes().ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusNotFound {
+			t.Errorf("status = %d, want %d", rr.Code, http.StatusNotFound)
+		}
+	})
+
+	t.Run("literal routes still take precedence over the id wildcard", func(t *testing.T) {
+		now := time.Now()
+		collisionStore := &stubStore{
+			pending: []reminder.Reminder{
+				{ID: "next", DueAt: now.Add(48 * time.Hour)},
+				{ID: "real-next", DueAt: now.Add(24 * time.Hour)},
+				{ID: "archive", DueAt: now.Add(72 * time.Hour), Text: "collision decoy for /reminders/archive"},
+			},
+			archive: []reminder.ArchivedReminder{
+				{Reminder: reminder.Reminder{ID: "last"}},
+				{Reminder: reminder.Reminder{ID: "real-archive-item"}},
+				{Reminder: reminder.Reminder{ID: "real-last"}},
+			},
+		}
+		collisionAPI := New(cfg, service.New(collisionStore))
+
+		get := func(path string) *httptest.ResponseRecorder {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			req.Header.Set("Authorization", "Bearer valid-token")
+			rr := httptest.NewRecorder()
+			collisionAPI.Routes().ServeHTTP(rr, req)
+			return rr
+		}
+
+		t.Run("archive returns the list, not a single reminder named 'archive'", func(t *testing.T) {
+			rr := get("/reminders/archive")
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d (body: %s)", rr.Code, http.StatusOK, rr.Body.String())
+			}
+			var got []reminder.ArchivedReminder
+
+			if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+				t.Fatalf("response wasn't a JSON array (getReminder would have returned a single object instead): %v", err)
+			}
+			found := false
+			for _, r := range got {
+				if r.ID == "real-archive-item" {
+					found = true
+				}
+			}
+
+			if !found {
+				t.Errorf("archive listing = %v, want it to contain real-archive-item", got)
+			}
+		})
+
+		t.Run("next returns the soonest pending reminder, not the one literally named 'next'", func(t *testing.T) {
+			rr := get("/reminders/next")
+
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d (body: %s)", rr.Code, http.StatusOK, rr.Body.String())
+			}
+			var rem reminder.Reminder
+
+			if err := json.NewDecoder(rr.Body).Decode(&rem); err != nil {
+				t.Fatalf("decoding response: %v", err)
+			}
+
+			if rem.ID != "real-next" {
+				t.Errorf("GET /reminders/next returned id %q, want %q (got the collision decoy instead of the soonest-due reminder)", rem.ID, "real-next")
+			}
+		})
+
+		t.Run("last returns the last-appended archived reminder, not the one literally named 'last'", func(t *testing.T) {
+			rr := get("/reminders/last")
+
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d (body: %s)", rr.Code, http.StatusOK, rr.Body.String())
+			}
+			var rem reminder.ArchivedReminder
+
+			if err := json.NewDecoder(rr.Body).Decode(&rem); err != nil {
+				t.Fatalf("decoding response: %v", err)
+			}
+
+			if rem.ID != "real-last" {
+				t.Errorf("GET /reminders/last returned id %q, want %q (got the collision decoy instead of the last-appended entry)", rem.ID, "real-last")
+			}
+		})
+	})
 }

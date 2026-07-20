@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/zawnk/later/internal/config"
@@ -28,6 +29,7 @@ func (a *API) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /reminders/archive", a.auth(a.listArchive))
 	mux.HandleFunc("GET /reminders/next", a.auth(a.nextReminder))
 	mux.HandleFunc("GET /reminders/last", a.auth(a.lastReminder))
+	mux.HandleFunc("GET /reminders/{id}", a.auth(a.getReminder))
 	mux.HandleFunc("DELETE /reminders/{id}", a.auth(a.cancelReminder))
 	mux.HandleFunc("POST /reminders/{id}/postpone", a.auth(a.postponeReminder))
 	mux.HandleFunc("GET /healthz", a.healthz)
@@ -39,13 +41,13 @@ func (a *API) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if !ok {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeJSONError(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 
 		verifiedToken, authorized := a.tokenCompare(token)
 		if !authorized {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeJSONError(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 
@@ -86,11 +88,11 @@ func (a *API) createReminder(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&body); err != nil {
-		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		writeJSONError(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	if body.Text == "" {
-		http.Error(w, "text is required", http.StatusBadRequest)
+		writeJSONError(w, "text is required", http.StatusBadRequest)
 		return
 	}
 
@@ -105,7 +107,7 @@ func (a *API) createReminder(w http.ResponseWriter, r *http.Request) {
 	} else {
 		outbound = filterAllowed(outbound, token.Outbound)
 		if len(outbound) == 0 {
-			http.Error(w, "no allowed outbound topics", http.StatusForbidden)
+			writeJSONError(w, "no allowed outbound topics", http.StatusForbidden)
 			return
 		}
 	}
@@ -132,16 +134,51 @@ func (a *API) listPending(w http.ResponseWriter, r *http.Request) {
 func (a *API) listArchive(w http.ResponseWriter, r *http.Request) {
 	reminders, err := a.svc.ListArchive()
 	if err != nil {
-		http.Error(w, "failed to load archive", http.StatusInternalServerError)
+		writeJSONError(w, "failed to load archive", http.StatusInternalServerError)
 		return
 	}
+
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		limit, err := strconv.Atoi(limitStr)
+
+		if err != nil || limit < 0 {
+			writeJSONError(w, "limit must be a non-negative integer", http.StatusBadRequest)
+			return
+		}
+
+		if limit > 0 && len(reminders) > limit {
+			reminders = reminders[len(reminders)-limit:]
+		}
+	}
+
 	writeJsonResponse(w, http.StatusOK, reminders)
+}
+
+func (a *API) getReminder(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	pending, archived, err := a.svc.Get(id)
+
+	if err != nil {
+		writeJSONError(w, "failed to load reminder", http.StatusInternalServerError)
+		return
+	}
+
+	if pending != nil {
+		writeJsonResponse(w, http.StatusOK, pending)
+		return
+	}
+
+	if archived != nil {
+		writeJsonResponse(w, http.StatusOK, archived)
+		return
+	}
+	writeJSONError(w, "reminder not found", http.StatusNotFound)
 }
 
 func (a *API) nextReminder(w http.ResponseWriter, r *http.Request) {
 	rem := a.svc.Next()
 	if rem == nil {
-		http.Error(w, "no pending reminders", http.StatusNotFound)
+		writeJSONError(w, "no pending reminders", http.StatusNotFound)
 		return
 	}
 	writeJsonResponse(w, http.StatusOK, rem)
@@ -150,11 +187,11 @@ func (a *API) nextReminder(w http.ResponseWriter, r *http.Request) {
 func (a *API) lastReminder(w http.ResponseWriter, r *http.Request) {
 	rem, err := a.svc.Last()
 	if err != nil {
-		http.Error(w, "failed to load archive", http.StatusInternalServerError)
+		writeJSONError(w, "failed to load archive", http.StatusInternalServerError)
 		return
 	}
 	if rem == nil {
-		http.Error(w, "no archived reminders", http.StatusNotFound)
+		writeJSONError(w, "no archived reminders", http.StatusNotFound)
 		return
 	}
 	writeJsonResponse(w, http.StatusOK, rem)
@@ -164,11 +201,11 @@ func (a *API) cancelReminder(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	found, err := a.svc.Cancel(id)
 	if err != nil {
-		http.Error(w, "failed to cancel reminder", http.StatusInternalServerError)
+		writeJSONError(w, "failed to cancel reminder", http.StatusInternalServerError)
 		return
 	}
 	if !found {
-		http.Error(w, "reminder not found", http.StatusNotFound)
+		writeJSONError(w, "reminder not found", http.StatusNotFound)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -178,7 +215,7 @@ func (a *API) postponeReminder(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	duration := r.URL.Query().Get("duration")
 	if duration == "" {
-		http.Error(w, "duration is required", http.StatusBadRequest)
+		writeJSONError(w, "duration is required", http.StatusBadRequest)
 		return
 	}
 
