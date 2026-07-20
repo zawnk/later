@@ -1,0 +1,624 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/alecthomas/kong"
+	"github.com/zawnk/later/internal/reminder"
+)
+
+func runCLI(t *testing.T, a *app, args ...string) error {
+	t.Helper()
+	var cli CLI
+	parser, err := kong.New(&cli, kong.Name("later"))
+
+	if err != nil {
+		t.Fatalf("kong.New() error = %v (broken grammar struct)", err)
+	}
+	ctx, err := parser.Parse(args)
+
+	if err != nil {
+		return err
+	}
+	a.json = cli.JSON
+	return ctx.Run(a)
+}
+
+func TestClientCreate(t *testing.T) {
+	want := reminder.Reminder{
+		ID:    "abc123",
+		Text:  "buy milk",
+		DueAt: time.Date(2026, 6, 18, 9, 0, 0, 0, time.UTC),
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/reminders" {
+			t.Errorf("request = %s %s, want POST /reminders", r.Method, r.URL.Path)
+		}
+
+		if got := r.Header.Get("Authorization"); got != "Bearer tk_test" {
+			t.Errorf("Authorization = %q, want %q", got, "Bearer tk_test")
+		}
+		body, _ := io.ReadAll(r.Body)
+
+		if string(body) != `{"text":"buy milk in 3 days"}` {
+			t.Errorf("body = %s, want text-only JSON", body)
+		}
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(want)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newClient(srv.URL, "tk_test")
+	got, err := c.create(createRequest{Text: "buy milk in 3 days"})
+
+	if err != nil {
+		t.Fatalf("create() error = %v", err)
+	}
+
+	if got.ID != want.ID || got.Text != want.Text || !got.DueAt.Equal(want.DueAt) {
+		t.Errorf("create() = %+v, want %+v", got, want)
+	}
+}
+
+func TestClientSurfacesServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "reminder abc123 is still pending, cannot postpone", http.StatusConflict)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newClient(srv.URL, "tk_test")
+	_, err := c.postpone("abc123", "1d")
+
+	if err == nil {
+		t.Fatal("postpone() error = nil, want the server's message")
+	}
+
+	if !strings.Contains(err.Error(), "still pending") {
+		t.Errorf("postpone() error = %q, want the server's message surfaced verbatim", err)
+	}
+}
+
+func TestClientSurfacesJSONServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"reminder abc123 is still pending, cannot postpone"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newClient(srv.URL, "tk_test")
+	_, err := c.postpone("abc123", "1d")
+
+	if err == nil {
+		t.Fatal("postpone() error = nil, want the server's message")
+	}
+
+	if strings.Contains(err.Error(), "{") {
+		t.Errorf("postpone() error = %q, want the extracted message, not the raw JSON envelope", err)
+	}
+
+	if !strings.Contains(err.Error(), "still pending") {
+		t.Errorf("postpone() error = %q, want the server's message extracted from the JSON envelope", err)
+	}
+}
+
+func TestFreeTextCreatesReminder(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(reminder.Reminder{ID: "abc123", Text: "buy milk"})
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "in", "3", "hours", "buy", "milk"); err != nil {
+		t.Fatalf("runCLI() error = %v", err)
+	}
+
+	if gotBody != `{"text":"in 3 hours buy milk"}` {
+		t.Errorf("server received body %s, want the args joined into text", gotBody)
+	}
+
+	if !strings.Contains(out.String(), "abc123") {
+		t.Errorf("output = %q, want it to mention the new reminder id", out.String())
+	}
+}
+
+func TestFreeTextWithTrailingTopicFlag(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(reminder.Reminder{ID: "abc123"})
+	}))
+	t.Cleanup(srv.Close)
+
+	a := &app{out: io.Discard, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "in", "3", "hours", "call", "paternal-grandma", "--topic=family-reminders"); err != nil {
+		t.Fatalf("runCLI() error = %v", err)
+	}
+	want := `{"text":"in 3 hours call paternal-grandma","outbound_topics":["family-reminders"]}`
+
+	if gotBody != want {
+		t.Errorf("server received body %s, want %s", gotBody, want)
+	}
+}
+
+func TestLeadingDashTextFailsLoudly(t *testing.T) {
+	a := &app{out: io.Discard, url: "http://irrelevant", token: "tk_test"}
+
+	if err := runCLI(t, a, "in", "3", "hours", "-important", "thing"); err == nil {
+		t.Error("runCLI() with a leading-dash text token error = nil, want a loud parse error")
+	}
+}
+
+func TestDashDashEscapeHatch(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(reminder.Reminder{ID: "abc123"})
+	}))
+	t.Cleanup(srv.Close)
+
+	a := &app{out: io.Discard, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "--", "temp", "is", "-5", "degrees", "tomorrow"); err != nil {
+		t.Fatalf("runCLI() with -- escape error = %v", err)
+	}
+
+	if gotBody != `{"text":"temp is -5 degrees tomorrow"}` {
+		t.Errorf("server received body %s, want the post--- tokens as literal text", gotBody)
+	}
+}
+
+func TestSubcommandDispatch(t *testing.T) {
+	var gotMethod, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		switch r.Method {
+		case http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			_, _ = w.Write([]byte(`[]`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "list"); err != nil {
+		t.Fatalf(`runCLI("list") error = %v`, err)
+	}
+
+	if gotMethod != http.MethodGet || gotPath != "/reminders" {
+		t.Errorf(`"list" made %s %s, want GET /reminders`, gotMethod, gotPath)
+	}
+
+	if !strings.Contains(out.String(), "no pending reminders") {
+		t.Errorf(`"list" output = %q, want the empty-list message`, out.String())
+	}
+
+	if err := runCLI(t, a, "cancel", "abc123"); err != nil {
+		t.Fatalf(`runCLI("cancel") error = %v`, err)
+	}
+
+	if gotMethod != http.MethodDelete || gotPath != "/reminders/abc123" {
+		t.Errorf(`"cancel" made %s %s, want DELETE /reminders/abc123`, gotMethod, gotPath)
+	}
+}
+
+func TestMissingArgsRejectedByParser(t *testing.T) {
+	a := &app{out: io.Discard, url: "http://irrelevant", token: "tk_test"}
+
+	if err := runCLI(t, a, "postpone", "abc123"); err == nil {
+		t.Error(`runCLI("postpone" without duration) error = nil, want a parse error`)
+	}
+
+	if err := runCLI(t, a, "cancel"); err == nil {
+		t.Error(`runCLI("cancel" without id) error = nil, want a parse error`)
+	}
+}
+
+func TestMissingTokenFailsEverythingButHealthcheck(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+
+	a := &app{out: io.Discard, url: srv.URL, token: ""}
+
+	err := runCLI(t, a, "list")
+
+	if err == nil || !strings.Contains(err.Error(), "LATER_TOKEN") {
+		t.Errorf(`runCLI("list") without token error = %v, want a LATER_TOKEN message`, err)
+	}
+
+	if err := runCLI(t, a, "healthcheck"); err != nil {
+		t.Errorf(`runCLI("healthcheck") without token error = %v, want nil`, err)
+	}
+}
+
+func TestHealthcheckUnhealthy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	a := &app{out: io.Discard, url: srv.URL, token: ""}
+
+	if err := runCLI(t, a, "healthcheck"); err == nil {
+		t.Error(`runCLI("healthcheck") against a failing server error = nil, want an error (exit 1 in main)`)
+	}
+}
+
+func TestListSorting(t *testing.T) {
+	early := time.Date(2026, 6, 16, 9, 0, 0, 0, time.UTC)
+	late := time.Date(2026, 6, 20, 9, 0, 0, 0, time.UTC)
+	stored := []reminder.Reminder{
+		{ID: "b-created-first-due-later", DueAt: late, CreatedAt: early},
+		{ID: "a-created-later-due-first", DueAt: early, CreatedAt: late},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(stored)
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "list"); err != nil {
+		t.Fatalf(`runCLI("list") error = %v`, err)
+	}
+
+	if first := strings.SplitN(out.String(), "\n", 2)[0]; !strings.HasPrefix(first, "a-") {
+		t.Errorf("default list order starts with %q, want the soonest-due reminder first", first)
+	}
+
+	out.Reset()
+
+	if err := runCLI(t, a, "list", "--by=create"); err != nil {
+		t.Fatalf(`runCLI("list --by=create") error = %v`, err)
+	}
+
+	if first := strings.SplitN(out.String(), "\n", 2)[0]; !strings.HasPrefix(first, "b-") {
+		t.Errorf("--by=create order starts with %q, want the first-created reminder first", first)
+	}
+
+	if err := runCLI(t, a, "list", "--by=nonsense"); err == nil {
+		t.Error(`runCLI("list --by=nonsense") error = nil, want an enum validation error`)
+	}
+}
+
+func TestNextEmptyIsNotAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "no pending reminders", http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "next"); err != nil {
+		t.Fatalf(`runCLI("next") on empty error = %v, want nil (exit 0)`, err)
+	}
+
+	if !strings.Contains(out.String(), "no pending reminders") {
+		t.Errorf(`"next" output = %q, want the server's empty-state message`, out.String())
+	}
+
+	out.Reset()
+	if err := runCLI(t, a, "--json", "next"); err != nil {
+		t.Fatalf(`runCLI("--json next") on empty error = %v`, err)
+	}
+
+	if strings.TrimSpace(out.String()) != "null" {
+		t.Errorf(`"--json next" output = %q, want null`, out.String())
+	}
+}
+
+func TestCancelNotFoundIsStillAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "reminder not found", http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	a := &app{out: io.Discard, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "cancel", "doesnotexist"); err == nil {
+		t.Error(`runCLI("cancel" on unknown id) error = nil, want an error -- 404 is only an empty state for next/last`)
+	}
+}
+
+func TestArchiveLimit(t *testing.T) {
+	stored := []reminder.ArchivedReminder{
+		{Reminder: reminder.Reminder{ID: "oldest"}},
+		{Reminder: reminder.Reminder{ID: "middle"}},
+		{Reminder: reminder.Reminder{ID: "newest"}},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(stored)
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "archive"); err != nil {
+		t.Fatalf(`runCLI("archive") error = %v`, err)
+	}
+
+	if strings.Contains(out.String(), "--limit") {
+		t.Errorf("archive under the limit printed a truncation hint: %q", out.String())
+	}
+
+	out.Reset()
+	if err := runCLI(t, a, "archive", "--limit=2"); err != nil {
+		t.Fatalf(`runCLI("archive --limit=2") error = %v`, err)
+	}
+	got := out.String()
+
+	if strings.Contains(got, "oldest") {
+		t.Errorf("--limit=2 output still contains the oldest entry: %q", got)
+	}
+
+	if !strings.Contains(got, "middle") || !strings.Contains(got, "newest") {
+		t.Errorf("--limit=2 output = %q, want the two most recent entries", got)
+	}
+
+	if !strings.Contains(got, "showing 2 of 3") {
+		t.Errorf("--limit=2 output = %q, want the truncation hint", got)
+	}
+}
+
+func TestJSONOutput(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	pending := []reminder.Reminder{{ID: "abc123", Text: "buy milk"}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(pending[0])
+		default:
+			_ = json.NewEncoder(w).Encode(pending)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "--json", "list"); err != nil {
+		t.Fatalf(`runCLI("--json list") error = %v`, err)
+	}
+	var gotList []reminder.Reminder
+
+	if err := json.Unmarshal(out.Bytes(), &gotList); err != nil {
+		t.Fatalf(`"--json list" output is not valid JSON: %v; output: %q`, err, out.String())
+	}
+
+	if len(gotList) != 1 || gotList[0].ID != "abc123" {
+		t.Errorf(`"--json list" decoded to %+v, want the server's list`, gotList)
+	}
+
+	out.Reset()
+	if err := runCLI(t, a, "--json", "in", "3", "days", "buy", "milk"); err != nil {
+		t.Fatalf(`runCLI("--json <free text>") error = %v`, err)
+	}
+	var gotRem reminder.Reminder
+
+	if err := json.Unmarshal(out.Bytes(), &gotRem); err != nil {
+		t.Fatalf(`"--json" create output is not valid JSON: %v; output: %q`, err, out.String())
+	}
+
+	if gotRem.ID != "abc123" {
+		t.Errorf(`"--json" create decoded to %+v, want the created reminder`, gotRem)
+	}
+}
+
+func TestCreateWithTopics(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(reminder.Reminder{ID: "abc123"})
+	}))
+	t.Cleanup(srv.Close)
+
+	a := &app{out: io.Discard, url: srv.URL, token: "tk_test"}
+	want := `{"text":"in 3 days standup","outbound_topics":["work","alerts"]}`
+
+	if err := runCLI(t, a, "--topic=work", "--topic=alerts", "in", "3", "days", "standup"); err != nil {
+		t.Fatalf("runCLI() with leading --topic error = %v", err)
+	}
+
+	if gotBody != want {
+		t.Errorf("leading --topic: server received body %s, want %s", gotBody, want)
+	}
+
+	gotBody = ""
+	if err := runCLI(t, a, "in", "3", "days", "standup", "--topic=work,alerts"); err != nil {
+		t.Fatalf("runCLI() with trailing --topic error = %v", err)
+	}
+
+	if gotBody != want {
+		t.Errorf("trailing --topic: server received body %s, want %s", gotBody, want)
+	}
+}
+
+func TestCreateWithTags(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(reminder.Reminder{ID: "abc123"})
+	}))
+	t.Cleanup(srv.Close)
+
+	a := &app{out: io.Discard, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "buy", "cake", "in", "3", "days", "--tag=partying_face,birthday"); err != nil {
+		t.Fatalf("runCLI() with --tag error = %v", err)
+	}
+
+	if want := `{"text":"buy cake in 3 days","tags":["partying_face","birthday"]}`; gotBody != want {
+		t.Errorf("server received body %s, want %s", gotBody, want)
+	}
+
+	gotBody = ""
+
+	if err := runCLI(t, a, "buy", "cake", "in", "3", "days", "--topic=family", "--tag=birthday"); err != nil {
+		t.Fatalf("runCLI() with --topic and --tag error = %v", err)
+	}
+
+	if want := `{"text":"buy cake in 3 days","outbound_topics":["family"],"tags":["birthday"]}`; gotBody != want {
+		t.Errorf("server received body %s, want %s", gotBody, want)
+	}
+}
+
+func TestCreateWithPriority(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(reminder.Reminder{ID: "abc123"})
+	}))
+	t.Cleanup(srv.Close)
+
+	a := &app{out: io.Discard, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "go", "to", "airport", "in", "8", "hours", "--priority=urgent"); err != nil {
+		t.Fatalf("runCLI() with --priority error = %v", err)
+	}
+
+	if want := `{"text":"go to airport in 8 hours","priority":"urgent"}`; gotBody != want {
+		t.Errorf("server received body %s, want %s", gotBody, want)
+	}
+
+	gotBody = ""
+
+	if err := runCLI(t, a, "go", "to", "airport", "in", "8", "hours", "--priority=hgih"); err == nil {
+		t.Fatal("runCLI() with an invalid --priority succeeded, want a kong enum parse error")
+	}
+
+	if gotBody != "" {
+		t.Errorf("server was reached with body %s, want no request for an invalid priority", gotBody)
+	}
+}
+
+func TestCreateWithClick(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(reminder.Reminder{ID: "abc123"})
+	}))
+	t.Cleanup(srv.Close)
+
+	a := &app{out: io.Discard, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "pay", "invoice", "tomorrow", "--click=https://example.com/invoice"); err != nil {
+		t.Fatalf("runCLI() with --click error = %v", err)
+	}
+
+	if want := `{"text":"pay invoice tomorrow","click":"https://example.com/invoice"}`; gotBody != want {
+		t.Errorf("server received body %s, want %s", gotBody, want)
+	}
+}
+
+func TestPipedStdinCreates(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(reminder.Reminder{ID: "abc123"})
+	}))
+	t.Cleanup(srv.Close)
+
+	a := &app{
+		out:   io.Discard,
+		url:   srv.URL,
+		token: "tk_test",
+		stdin: strings.NewReader("in 3d call xyz\n"),
+	}
+
+	if err := runCLI(t, a); err != nil {
+		t.Fatalf("runCLI() with piped stdin error = %v", err)
+	}
+
+	if gotBody != `{"text":"in 3d call xyz"}` {
+		t.Errorf("server received body %s, want the trimmed stdin content as text", gotBody)
+	}
+}
+
+func TestNoTextAndNoStdinErrors(t *testing.T) {
+	a := &app{out: io.Discard, url: "http://irrelevant", token: "tk_test", stdin: nil}
+	err := runCLI(t, a)
+
+	if err == nil {
+		t.Fatal("runCLI() with no text and no pipe error = nil, want an error")
+	}
+
+	if !strings.Contains(err.Error(), "stdin") && !strings.Contains(err.Error(), "pipe") {
+		t.Errorf("error = %q, want it to mention the piping alternative", err)
+	}
+}
+
+func TestSaveAndResolveLastID(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	if _, err := resolveID("last"); err == nil {
+		t.Error(`resolveID("last") error = nil before any save, want an error`)
+	}
+
+	if id, err := resolveID("abc123"); err != nil || id != "abc123" {
+		t.Errorf(`resolveID("abc123") = %q, %v; want passthrough`, id, err)
+	}
+
+	saveLastID("def456")
+	id, err := resolveID("last")
+	if err != nil {
+		t.Fatalf(`resolveID("last") error = %v after save`, err)
+	}
+	if id != "def456" {
+		t.Errorf(`resolveID("last") = %q, want %q`, id, "def456")
+	}
+}
