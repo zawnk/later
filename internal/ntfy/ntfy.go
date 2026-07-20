@@ -183,10 +183,12 @@ func (c *Client) Run(ctx context.Context, create func(text string, outbound []st
 		topics[i] = inbound.Topic
 	}
 	combined := strings.Join(topics, ",")
+	var since string
 
 	for {
-		slog.Info("subscribing to ntfy topics", "topics", combined)
-		err := c.subscribe(ctx, combined, msgs)
+		slog.Info("subscribing to ntfy topics", "topics", combined, "since", since)
+		newSince, err := c.subscribe(ctx, combined, since, msgs)
+		since = newSince
 
 		if ctx.Err() != nil {
 			slog.Info("shutdown signal received- ntfy subscriber stopped")
@@ -219,28 +221,33 @@ func (c *Client) consume(ctx context.Context, msgs <-chan subscriptionMessage, c
 	}
 }
 
-func (c *Client) subscribe(ctx context.Context, topics string, incomingMsgs chan<- subscriptionMessage) error {
+func (c *Client) subscribe(ctx context.Context, topics, since string, incomingMsgs chan<- subscriptionMessage) (string, error) {
 	url := fmt.Sprintf("%s/%s/json", strings.TrimRight(c.cfg.Ntfy.Server, "/"), topics)
+	if since != "" {
+		url += "?since=" + since
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return err
+		return since, err
 	}
 
 	req.Header.Set("Authorization", "Bearer "+c.cfg.Ntfy.Token)
 
 	resp, err := c.subscribeClient.Do(req)
 	if err != nil {
-		return err
+		return since, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("ntfy subscription failed with status %d: %s", resp.StatusCode, body)
+		return since, fmt.Errorf("ntfy subscription failed with status %d: %s", resp.StatusCode, body)
 	}
 
-	slog.Info("successfully subscribed to ntfy topics", "host", c.cfg.Ntfy.Server, "topics", topics)
+	slog.Info("successfully subscribed to ntfy topics", "host", c.cfg.Ntfy.Server, "topics", topics, "since", since)
+
+	lastID := since
 
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
@@ -254,6 +261,11 @@ func (c *Client) subscribe(ctx context.Context, topics string, incomingMsgs chan
 			slog.Warn("failed to parse ntfy message", "err", err)
 			continue
 		}
+
+		if msg.ID != "" {
+			lastID = msg.ID
+		}
+
 		if msg.Event != "message" {
 			continue
 		}
@@ -272,11 +284,11 @@ func (c *Client) subscribe(ctx context.Context, topics string, incomingMsgs chan
 		select {
 		case incomingMsgs <- sub:
 		case <-ctx.Done():
-			return ctx.Err()
+			return lastID, ctx.Err()
 		}
 	}
 
-	return scanner.Err()
+	return lastID, scanner.Err()
 }
 
 func (c *Client) resolveOutbound(topic string) []string {

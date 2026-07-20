@@ -397,7 +397,7 @@ func TestSubscribe(t *testing.T) {
 	c := New(testConfig(srv.URL))
 
 	msgs := make(chan subscriptionMessage, 16)
-	if err := c.subscribe(context.Background(), "inbound-a,inbound-b", msgs); err != nil {
+	if _, err := c.subscribe(context.Background(), "inbound-a,inbound-b", "", msgs); err != nil {
 		t.Fatalf("subscribe() error = %v", err)
 	}
 	close(msgs)
@@ -442,7 +442,7 @@ func TestSubscribe_ServerError(t *testing.T) {
 	c := New(testConfig(srv.URL))
 	msgs := make(chan subscriptionMessage, 1)
 
-	err := c.subscribe(context.Background(), "inbound-a", msgs)
+	_, err := c.subscribe(context.Background(), "inbound-a", "", msgs)
 	if err == nil {
 		t.Fatal("subscribe() error = nil, want an error for a 401 response")
 	}
@@ -656,6 +656,83 @@ func TestRun_ReconnectsAfterStreamDrops(t *testing.T) {
 	defer mu.Unlock()
 	if connections < 2 {
 		t.Errorf("server saw %d subscribe connections, want at least 2 (reconnect)", connections)
+	}
+}
+
+func TestRun_ResubscribesWithSince(t *testing.T) {
+	var mu sync.Mutex
+	var sinceParams []string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			return
+		}
+		mu.Lock()
+		sinceParams = append(sinceParams, r.URL.Query().Get("since"))
+		n := len(sinceParams)
+		mu.Unlock()
+
+		if n == 1 {
+			_, _ = io.WriteString(w, `{"id":"msg-1","event":"message","topic":"inbound-a","message":"hi"}`+"\n")
+			return
+		}
+
+		_, _ = io.WriteString(w, `{"id":"msg-2","event":"message","topic":"inbound-a","message":"there"}`+"\n")
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+
+	c := New(testConfig(srv.URL))
+	c.reconnectWait = time.Millisecond
+
+	created := make(chan createCall, 64)
+	create := func(text string, outbound []string) (*reminder.Reminder, error) {
+		created <- createCall{text: text, outbound: outbound}
+		return &reminder.Reminder{ID: "rem-1"}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		c.Run(ctx, create)
+	}()
+
+	var texts []string
+	for i := range 2 {
+		select {
+		case call := <-created:
+			texts = append(texts, call.text)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for create %d", i)
+		}
+	}
+	if !slices.Equal(texts, []string{"hi", "there"}) {
+		t.Errorf("created texts = %v, want [hi there] -- the reconnect must not lose \"there\"", texts)
+	}
+
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sinceParams) < 2 {
+		t.Fatalf("saw %d connections, want at least 2", len(sinceParams))
+	}
+	if sinceParams[0] != "" {
+		t.Errorf("first connection since = %q, want empty (no since= on first connect)", sinceParams[0])
+	}
+	if sinceParams[1] != "msg-1" {
+		t.Errorf("second connection since = %q, want %q (resume from the last seen message ID)", sinceParams[1], "msg-1")
 	}
 }
 
