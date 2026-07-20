@@ -1,0 +1,15 @@
+# later CLI config
+# copy to ~/.config/later/config (or $XDG_CONFIG_HOME/later/config) and fill in.
+#  Flags and env vars (--url/--token, LATER_URL/LATER_TOKEN) override this file if set.
+#
+# Note: this format only supports whole-line "#" comments -- a trailing
+# "# ..." after a value becomes part of the value, not a comment.
+
+# The `later` server's own address - matches server.base_url in
+# data/config.yaml.example on the server. NOT your ntfy server's URL: easy
+# to mix up since later is so tightly coupled with ntfy, which is exactly
+# why the later_ prefix on these keys exists.
+later_url = https://later.domain.com
+
+# One of the auth_tokens entries from data/config.yaml.example on the server.
+later_token = tk_replace_this_with_a_real_token_at_least_16_chars
