@@ -27,7 +27,6 @@ func (s *Scheduler) Run(ctx context.Context) {
 	// fire any missed reminders on startup
 	s.tick(ctx)
 
-	// TODO: is one minute fine?
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 
@@ -45,7 +44,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 func (s *Scheduler) tick(ctx context.Context) {
 	now := time.Now()
 	for _, r := range s.store.ListPendingReminders() {
-		if r.DueAt.Before(now) || r.DueAt.Equal(now) {
+		if !r.DueAt.After(now) {
 			late := r.DueAt.Before(s.startedAt)
 			if err := s.notify(ctx, r, late); err != nil {
 				slog.Error("failed to send notification", "id", r.ID, "err", err)
