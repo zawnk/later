@@ -113,9 +113,9 @@ func (s *Service) CreateReminder(in CreateInput) (*reminder.Reminder, error) {
 		return nil, fmt.Errorf("%w: no time information found in: %q", ErrInvalidInput, text)
 	}
 
-	task := strings.TrimSpace(strings.Replace(text, result.Text, "", 1))
-	task = strings.TrimPrefix(task, " at ")
-	task = strings.TrimSpace(task)
+	task := strings.Join(strings.Fields(strings.Replace(text, result.Text, "", 1)), " ")
+	task = strings.TrimSuffix(task, " at")
+	task = strings.TrimPrefix(task, "at ")
 	if task == "" {
 		return nil, fmt.Errorf("%w: no task text found", ErrInvalidInput)
 	}
