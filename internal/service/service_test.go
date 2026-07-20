@@ -138,6 +138,9 @@ func TestCreateReminder(t *testing.T) {
 		{"just a time string", "in 2 hours", []string{"topic-a"}, "", time.Time{}, true},
 		{"due date in the past", "buy milk yesterday", []string{"topic-a"}, "", time.Time{}, true},
 		{"check the at trim", "attend standup in 3 days", []string{"topic-a"}, "attend standup", fixedNow.AddDate(0, 0, 3), false},
+		{"dangling at trim", "call mom at 5pm", []string{"topic-a"}, "call mom", time.Date(2026, 6, 15, 17, 0, 0, 0, time.Local), false},
+		{"leading at trim", "at 5pm call mom", []string{"topic-a"}, "call mom", time.Date(2026, 6, 15, 17, 0, 0, 0, time.Local), false},
+		{"mid-string double space collapse, no at involved", "buy milk tomorrow from the store", []string{"topic-a"}, "buy milk from the store", fixedNow.AddDate(0, 0, 1), false},
 		{"multiple outbound topics are passed through", "buy milk in 3 days", []string{"topic-a", "topic-b"}, "buy milk", fixedNow.AddDate(0, 0, 3), false},
 		{"nil outbound topics are passed through", "buy milk in 3 days", nil, "buy milk", fixedNow.AddDate(0, 0, 3), false},
 	}
