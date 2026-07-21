@@ -22,13 +22,21 @@ import (
 	"github.com/zawnk/later/internal/store"
 )
 
+var version = "dev"
+
 func main() {
+	configPath := flag.String("config", "/data/config.yaml", "path to config file")
+	showVersion := flag.Bool("version", false, "print version and exit")
+	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
+
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))
-
-	configPath := flag.String("config", "/data/config.yaml", "path to config file")
-	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {

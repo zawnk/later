@@ -14,10 +14,13 @@ import (
 	"github.com/zawnk/later/internal/reminder"
 )
 
+var version = "dev"
+
 type CLI struct {
-	URL   string `env:"LATER_URL" default:"http://localhost:8080" help:"Base URL of the later server."`
-	Token string `env:"LATER_TOKEN" help:"Bearer token (one of the server's auth_tokens)."`
-	JSON  bool   `help:"Output machine-readable JSON on stdout instead of text (for jq/scripting)."`
+	Version kong.VersionFlag `help:"Print version and exit."`
+	URL     string           `env:"LATER_URL" default:"http://localhost:8080" help:"Base URL of the later server."`
+	Token   string           `env:"LATER_TOKEN" help:"Bearer token (one of the server's auth_tokens)."`
+	JSON    bool             `help:"Output machine-readable JSON on stdout instead of text (for jq/scripting)."`
 
 	Create      CreateCmd      `cmd:"" default:"withargs" help:"Create a reminder from free text (no quotes needed). This is the default command."`
 	List        ListCmd        `cmd:"" help:"List pending reminders."`
@@ -60,6 +63,7 @@ func main() {
 		kong.Description("Reminders via ntfy. Free text creates a reminder: later in 3d buy milk"),
 		kong.UsageOnError(),
 		kong.Resolvers(resolver),
+		kong.Vars{"version": version},
 	)
 
 	var stdin io.Reader
