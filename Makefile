@@ -9,6 +9,12 @@ GO    := go
 GOFMT := gofmt
 endif
 
+ifeq ($(shell command -v golangci-lint 2>/dev/null),)
+GOLANGCI_LINT := mise exec golangci-lint -- golangci-lint
+else
+GOLANGCI_LINT := golangci-lint
+endif
+
 BIN_DIR := bin
 
 .DEFAULT_GOAL := help
@@ -52,16 +58,11 @@ vet: ## go vet
 	$(GO) vet ./...
 
 .PHONY: lint
-lint: ## golangci-lint if installed, otherwise fall back to go vet
-	@if command -v golangci-lint >/dev/null 2>&1; then \
-		golangci-lint run ./...; \
-	else \
-		echo "golangci-lint not installed, running go vet instead"; \
-		$(GO) vet ./...; \
-	fi
+lint: ## golangci-lint (part of `check`; from PATH or mise, same resolution as $(GO))
+	$(GOLANGCI_LINT) run ./...
 
 .PHONY: check
-check: fmt-check vet race ## everything CI would run: fmt-check + vet + race tests
+check: fmt-check vet lint race ## everything CI would run: fmt-check + vet + lint + race tests
 
 .PHONY: tidy
 tidy: ## go mod tidy
