@@ -135,6 +135,7 @@ func TestCreateReminder(t *testing.T) {
 		{"text with no time", "buy eggs", []string{"topic-a"}, "", time.Time{}, true},
 		{"embedded multi-unit sequence inside a word is not a duration, combined-run path)", "check server1h2m status", []string{"topic-a"}, "", time.Time{}, true},
 		{"valid reminder with calendar date", "marathon is on 10/10/2026", []string{"topic-a"}, "marathon is on", time.Date(2026, 10, 10, 9, 0, 0, 0, time.Local), false},
+		{"slash date is day/month, not month/day", "book the campsite 28/07/2026", []string{"topic-a"}, "book the campsite", time.Date(2026, 7, 28, 9, 0, 0, 0, time.Local), false},
 		{"weekday expression", "let's meet next tuesday", []string{"topic-a"}, "let's meet", time.Date(2026, 06, 16, 9, 0, 0, 0, time.Local), false},
 		{"just a time string", "in 2 hours", []string{"topic-a"}, "", time.Time{}, true},
 		{"due date in the past", "buy milk yesterday", []string{"topic-a"}, "", time.Time{}, true},
