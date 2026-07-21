@@ -19,7 +19,7 @@ help: ## list available targets
 
 .PHONY: build
 build: ## build server and CLI into ./bin (later-server, later)
-	$(GO) build -o $(BIN_DIR)/later-server ./cmd/server
+	$(GO) build -o $(BIN_DIR)/later-server ./cmd/later-server
 	$(GO) build -o $(BIN_DIR)/later ./cmd/later
 
 .PHONY: test
@@ -69,7 +69,7 @@ tidy: ## go mod tidy
 
 .PHONY: run
 run: ## run the server against ./config.yaml
-	$(GO) run ./cmd/server -config config.yaml
+	$(GO) run ./cmd/later-server -config config.yaml
 
 .PHONY: clean
 clean: ## remove build artifacts and coverage output
