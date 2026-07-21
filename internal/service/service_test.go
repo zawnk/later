@@ -39,16 +39,16 @@ func TestPreprocessDuration(t *testing.T) {
 	}{
 		{"single day", "3d", "3 days"},
 		{"with a leading word", "in 3d", "in 3 days"},
-		{"back-to-back units", "2h30m", "2 hours 30 minutes"},
-		{"matches inside a word", "server1h down", "server 1 hours down"},
 		{"weeks", "in 4w test", "in 4 weeks test"},
 		{"months", "3mo time", "3 months time"},
 		{"three letter mon", "pok3 mon", "pok3 mon"},
 		{"years", "10y is a decade", "10 years is a decade"},
 		{"seconds", "60s make a minute", "60 seconds make a minute"},
 		{"no time included", "no time included", "no time included"},
-		{"all at once", "1y2mo3w4d5h6m7s", "1 years 2 months 3 weeks 4 days 5 hours 6 minutes 7 seconds"},
-		{"order check", "3m1mo", "3 minutes 1 months"},
+		{"no longer matches inside a word)", "server1h down", "server1h down"},
+		{"no longer matches inside a word)", "remind me to check server1h status", "remind me to check server1h status"},
+		{"combined units are no longer this function's job", "2h30m", "2h30m"},
+		{"combined units are no longer this function's job, full combo", "1y2mo3w4d5h6m7s", "1y2mo3w4d5h6m7s"},
 	}
 
 	for _, tt := range tests {
@@ -133,6 +133,7 @@ func TestCreateReminder(t *testing.T) {
 		{"string longer than maxReminderTextLength", strings.Repeat("a", 4097), []string{"topic-a"}, "", time.Time{}, true},
 		{"string exactly maxReminderTextLength", strings.Repeat("a", 4086) + " in 9 days", []string{"topic-a"}, strings.Repeat("a", 4086), fixedNow.AddDate(0, 0, 9), false},
 		{"text with no time", "buy eggs", []string{"topic-a"}, "", time.Time{}, true},
+		{"embedded multi-unit sequence inside a word is not a duration, combined-run path)", "check server1h2m status", []string{"topic-a"}, "", time.Time{}, true},
 		{"valid reminder with calendar date", "marathon is on 10/10/2026", []string{"topic-a"}, "marathon is on", time.Date(2026, 10, 10, 9, 0, 0, 0, time.Local), false},
 		{"weekday expression", "let's meet next tuesday", []string{"topic-a"}, "let's meet", time.Date(2026, 06, 16, 9, 0, 0, 0, time.Local), false},
 		{"just a time string", "in 2 hours", []string{"topic-a"}, "", time.Time{}, true},
@@ -143,6 +144,12 @@ func TestCreateReminder(t *testing.T) {
 		{"mid-string double space collapse, no at involved", "buy milk tomorrow from the store", []string{"topic-a"}, "buy milk from the store", fixedNow.AddDate(0, 0, 1), false},
 		{"multiple outbound topics are passed through", "buy milk in 3 days", []string{"topic-a", "topic-b"}, "buy milk", fixedNow.AddDate(0, 0, 3), false},
 		{"nil outbound topics are passed through", "buy milk in 3 days", nil, "buy milk", fixedNow.AddDate(0, 0, 3), false},
+		{"compact duration: single unit", "buy milk in 3d", []string{"topic-a"}, "buy milk", fixedNow.AddDate(0, 0, 3), false},
+		{"compact duration: combined weeks+days", "clean the gutters in 1w2d", []string{"topic-a"}, "clean the gutters", fixedNow.AddDate(0, 0, 9), false},
+		{"compact duration: combined hours+minutes", "check the oven in 2h30m", []string{"topic-a"}, "check the oven", fixedNow.Add(2*time.Hour + 30*time.Minute), false},
+		{"compact duration: every unit combined", "renew everything in 1y2mo3w4d5h6m", []string{"topic-a"}, "renew everything", fixedNow.AddDate(1, 2, 25).Add(5*time.Hour + 6*time.Minute), false},
+		{"exact calendar date", "defrost the freezer october 21st", []string{"topic-a"}, "defrost the freezer", time.Date(2026, 10, 21, 9, 0, 0, 0, time.Local), false},
+		{"combined weekday and time", "pick up the dry cleaning next tuesday at 2pm", []string{"topic-a"}, "pick up the dry cleaning", time.Date(2026, 6, 16, 14, 0, 0, 0, time.Local), false},
 	}
 
 	for _, tt := range tests {
