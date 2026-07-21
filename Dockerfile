@@ -14,9 +14,7 @@ ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/later-server ./cmd/later-server
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/later ./cmd/later
 
-FROM gcr.io/distroless/static-debian12:nonroot
-
-WORKDIR /
+FROM gcr.io/distroless/static-debian12:latest
 
 COPY --from=builder /out/later-server /later-server
 COPY --from=builder /out/later /later
