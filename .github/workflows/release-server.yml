@@ -4,9 +4,16 @@ on:
   push:
     tags:
       - 'later-server/v*'
+  workflow_dispatch:
+    inputs:
+      push:
+        description: 'Push the built image to GHCR (leave unchecked to just test that the build works/how long it takes)'
+        type: boolean
+        default: false
 
 jobs:
   build-binaries:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -31,15 +38,16 @@ jobs:
           mkdir -p dist
           go build -trimpath \
             -ldflags="-s -w -X main.version=${{ steps.version.outputs.version }}" \
-            -o dist/later-server ./cmd/later-server
-          tar -C dist -czf "later-server_${{ steps.version.outputs.version }}_linux_${{ matrix.goarch }}.tar.gz" later-server
+            -o "dist/later-server_${{ steps.version.outputs.version }}_linux_${{ matrix.goarch }}" \
+            ./cmd/later-server
 
       - uses: actions/upload-artifact@v7
         with:
           name: later-server_linux_${{ matrix.goarch }}
-          path: later-server_*.tar.gz
+          path: dist/later-server_*
 
   release-binaries:
+    if: github.event_name == 'push'
     needs: build-binaries
     runs-on: ubuntu-latest
     permissions:
@@ -53,7 +61,7 @@ jobs:
 
       - name: Checksums
         working-directory: dist
-        run: sha256sum *.tar.gz > later-server_checksums.txt
+        run: sha256sum later-server_v* > later-server_checksums.txt
 
       - uses: softprops/action-gh-release@v3
         with:
@@ -72,10 +80,15 @@ jobs:
       - name: Derive version from tag
         id: version
         run: |
-          # GITHUB_REF_NAME for a tag push is the tag itself, e.g.
-          # "later-server/v0.1.0" -- strip the tag_prefix to get "v0.1.0",
-          # matching the build-binaries job above.
-          echo "version=${GITHUB_REF_NAME#later-server/}" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            # GITHUB_REF_NAME for a tag push is the tag itself, e.g.
+            # "later-server/v0.1.0" -- strip the tag_prefix to get "v0.1.0",
+            # matching the build-binaries job above.
+            echo "version=${GITHUB_REF_NAME#later-server/}" >> "$GITHUB_OUTPUT"
+          else
+            # Manual test run, no tag involved.
+            echo "version=dev" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
@@ -89,23 +102,29 @@ jobs:
       - name: Compute image tags
         id: tags
         run: |
-          VERSION="${{ steps.version.outputs.version }}" # v0.1.0
-          BARE="${VERSION#v}"                             # 0.1.0
-          MINOR="${BARE%.*}"                               # 0.1
           IMAGE="ghcr.io/${{ github.repository_owner }}/later-server"
-          {
-            echo "tags<<EOF"
-            echo "${IMAGE}:${BARE}"
-            echo "${IMAGE}:${MINOR}"
-            echo "${IMAGE}:latest"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            VERSION="${{ steps.version.outputs.version }}" # v0.1.0
+            BARE="${VERSION#v}"                             # 0.1.0
+            MINOR="${BARE%.*}"                               # 0.1
+            {
+              echo "tags<<EOF"
+              echo "${IMAGE}:${BARE}"
+              echo "${IMAGE}:${MINOR}"
+              echo "${IMAGE}:latest"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            # Manual test run: one fixed, always-overwritten tag -- never
+            # touches the real X.Y.Z/X.Y/latest tags a genuine release uses.
+            echo "tags=${IMAGE}:dev" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: true
+          push: ${{ github.event_name == 'push' || inputs.push }}
           build-args: |
             VERSION=${{ steps.version.outputs.version }}
           tags: ${{ steps.tags.outputs.tags }}
