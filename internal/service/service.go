@@ -31,6 +31,8 @@ type Store interface {
 	CancelReminder(id string) (bool, error)
 }
 
+var singleUnitRegex = regexp.MustCompile(`(^|\s)(\d+)(y|mo|w|d|h|m|s)\b`)
+var combinedDurationRegex = regexp.MustCompile(`(^|\s)((?:in |within )?(?:\d+(?:y|mo|w|d|h|m|s)){2,})\b`)
 var durationRegex = regexp.MustCompile(`(\d+)(y|mo|w|d|h|m|s)`)
 
 var durationWords = map[string]string{
@@ -41,6 +43,29 @@ var durationWords = map[string]string{
 	"h":  "hours",
 	"m":  "minutes",
 	"s":  "seconds",
+}
+
+func sumDurationMatches(matches [][]string) (years, months, days int, clock time.Duration) {
+	for _, match := range matches {
+		n, _ := strconv.Atoi(match[1])
+		switch match[2] {
+		case "y":
+			years += n
+		case "mo":
+			months += n
+		case "w":
+			days += n * 7
+		case "d":
+			days += n
+		case "h":
+			clock += time.Duration(n) * time.Hour
+		case "m":
+			clock += time.Duration(n) * time.Minute
+		case "s":
+			clock += time.Duration(n) * time.Second
+		}
+	}
+	return
 }
 
 type Service struct {
@@ -98,24 +123,19 @@ func (s *Service) CreateReminder(in CreateInput) (*reminder.Reminder, error) {
 		return nil, fmt.Errorf("%w: reminder text too long (max %d chars)", ErrInvalidInput, maxReminderTextLength)
 	}
 
-	text = preprocessDuration(text)
-
-	result, err := s.parser.Parse(text, s.now())
+	textForTask, matchedText, parsedTime, err := s.parseDueTime(text)
 	if err != nil {
-		return nil, fmt.Errorf("%w: failed to parse time: %w", ErrInvalidInput, err)
-	}
-	if result == nil {
-		return nil, fmt.Errorf("%w: no time information found in: %q", ErrInvalidInput, text)
+		return nil, err
 	}
 
-	task := strings.Join(strings.Fields(strings.Replace(text, result.Text, "", 1)), " ")
+	task := collapseWhitespace(strings.Replace(textForTask, matchedText, "", 1))
 	task = strings.TrimSuffix(task, " at")
 	task = strings.TrimPrefix(task, "at ")
 	if task == "" {
 		return nil, fmt.Errorf("%w: no task text found", ErrInvalidInput)
 	}
 
-	dueAt := result.Time.Local().Round(time.Minute)
+	dueAt := parsedTime.Local().Round(time.Minute)
 	if dueAt.Before(s.now().Round(time.Minute)) {
 		return nil, fmt.Errorf("%w: due time %s is in the past", ErrInvalidInput, dueAt.Format(time.RFC3339))
 	}
@@ -138,16 +158,38 @@ func (s *Service) CreateReminder(in CreateInput) (*reminder.Reminder, error) {
 	return rem, nil
 }
 
+func (s *Service) parseDueTime(text string) (textForTask, matchedText string, parsedTime time.Time, err error) {
+	if m := combinedDurationRegex.FindStringSubmatch(text); m != nil {
+		run := m[2]
+		years, months, days, clock := sumDurationMatches(durationRegex.FindAllStringSubmatch(run, -1))
+		return text, run, s.now().AddDate(years, months, days).Add(clock), nil
+	}
+
+	preprocessed := preprocessDuration(text)
+	result, perr := s.parser.Parse(preprocessed, s.now())
+	if perr != nil {
+		return "", "", time.Time{}, fmt.Errorf("%w: failed to parse time: %w", ErrInvalidInput, perr)
+	}
+	if result == nil {
+		return "", "", time.Time{}, fmt.Errorf("%w: no time information found in: %q", ErrInvalidInput, preprocessed)
+	}
+	return preprocessed, result.Text, result.Time, nil
+}
+
 func preprocessDuration(s string) string {
-	res := durationRegex.ReplaceAllStringFunc(s, func(match string) string {
-		parts := durationRegex.FindStringSubmatch(match)
+	res := singleUnitRegex.ReplaceAllStringFunc(s, func(match string) string {
+		parts := singleUnitRegex.FindStringSubmatch(match)
 
-		word := durationWords[parts[2]]
+		word := durationWords[parts[3]]
 
-		return fmt.Sprintf(" %s %s ", parts[1], word)
+		return fmt.Sprintf("%s %s %s ", parts[1], parts[2], word)
 	})
 
 	return strings.ReplaceAll(strings.TrimSpace(res), "  ", " ")
+}
+
+func collapseWhitespace(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 func (s *Service) ListPending() []reminder.Reminder {
@@ -261,30 +303,6 @@ func applyDuration(duration string, from time.Time) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("invalid duration: %s", duration)
 	}
 
-	var years, months, days int
-	var clock time.Duration
-
-	for _, match := range matches {
-		n, _ := strconv.Atoi(match[1])
-		switch match[2] {
-		case "y":
-			years += n
-		case "mo":
-			months += n
-		case "w":
-			days += n * 7
-		case "d":
-			days += n
-		case "h":
-			clock += time.Duration(n) * time.Hour
-		case "m":
-			clock += time.Duration(n) * time.Minute
-		case "s":
-			clock += time.Duration(n) * time.Second
-
-		default:
-			return time.Time{}, fmt.Errorf("unknown unit: %s", match[2])
-		}
-	}
+	years, months, days, clock := sumDurationMatches(matches)
 	return from.AddDate(years, months, days).Add(clock), nil
 }
