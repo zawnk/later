@@ -1,0 +1,10 @@
+.git
+.github
+docs
+bin
+data
+coverage.out
+*.test
+compose.yml
+Dockerfile
+.dockerignore
