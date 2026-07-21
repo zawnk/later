@@ -16,6 +16,8 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags=
 
 FROM gcr.io/distroless/static-debian12:nonroot
 
+WORKDIR /
+
 COPY --from=builder /out/later-server /later-server
 COPY --from=builder /out/later /later
 
