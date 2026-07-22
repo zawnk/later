@@ -368,6 +368,63 @@ func TestListArchive_Limit(t *testing.T) {
 	}
 }
 
+func TestListArchive_Search(t *testing.T) {
+	cfg := &config.Config{
+		AuthTokens: []config.Token{{Token: "valid-token", Outbound: []string{"topic-a"}}},
+	}
+	archive := []reminder.ArchivedReminder{
+		{Reminder: reminder.Reminder{ID: "1", Text: "buy milk"}},
+		{Reminder: reminder.Reminder{ID: "2", Text: "call the plumber"}},
+		{Reminder: reminder.Reminder{ID: "3", Text: "Buy Bread"}},
+	}
+
+	tests := []struct {
+		name      string
+		query     string
+		wantIDs   []string
+		wantTotal string
+	}{
+		{"no q param returns everything", "", []string{"1", "2", "3"}, "3"},
+		{"substring match", "?q=milk", []string{"1"}, "1"},
+		{"case-insensitive match", "?q=BUY", []string{"1", "3"}, "2"},
+		{"no matches", "?q=nonexistent", []string{}, "0"},
+		{"q and limit combine: filters first, then truncates the filtered set", "?q=buy&limit=1", []string{"3"}, "2"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &stubStore{archive: slices.Clone(archive)}
+			a := New(cfg, service.New(store))
+
+			req := httptest.NewRequest(http.MethodGet, "/reminders/archive"+tt.query, nil)
+			req.Header.Set("Authorization", "Bearer valid-token")
+			rr := httptest.NewRecorder()
+			a.Routes().ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d (body: %s)", rr.Code, http.StatusOK, rr.Body.String())
+			}
+
+			if got := rr.Header().Get("X-Total-Count"); got != tt.wantTotal {
+				t.Errorf("X-Total-Count = %q, want %q", got, tt.wantTotal)
+			}
+
+			var got []reminder.ArchivedReminder
+			if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+				t.Fatalf("decoding response: %v", err)
+			}
+			gotIDs := []string{}
+			for _, r := range got {
+				gotIDs = append(gotIDs, r.ID)
+			}
+
+			if !slices.Equal(gotIDs, tt.wantIDs) {
+				t.Errorf("archive IDs = %v, want %v", gotIDs, tt.wantIDs)
+			}
+		})
+	}
+}
+
 func TestGetReminder(t *testing.T) {
 	cfg := &config.Config{
 		AuthTokens: []config.Token{{Token: "valid-token", Outbound: []string{"topic-a"}}},
@@ -559,6 +616,57 @@ func TestListPending_Sort(t *testing.T) {
 
 			if len(got) == 0 || got[0].ID != tt.wantFirst {
 				t.Errorf("first reminder = %+v, want ID %q first", got, tt.wantFirst)
+			}
+		})
+	}
+}
+
+func TestListPending_Search(t *testing.T) {
+	cfg := &config.Config{
+		AuthTokens: []config.Token{{Token: "valid-token", Outbound: []string{"topic-a"}}},
+	}
+	pending := []reminder.Reminder{
+		{ID: "1", Text: "buy milk"},
+		{ID: "2", Text: "call the plumber"},
+		{ID: "3", Text: "Buy Bread"},
+	}
+
+	tests := []struct {
+		name    string
+		query   string
+		wantIDs []string
+	}{
+		{"no q param returns everything", "", []string{"1", "2", "3"}},
+		{"substring match", "?q=milk", []string{"1"}},
+		{"case-insensitive match", "?q=BUY", []string{"1", "3"}},
+		{"no matches", "?q=nonexistent", []string{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &stubStore{pending: slices.Clone(pending)}
+			a := New(cfg, service.New(store))
+
+			req := httptest.NewRequest(http.MethodGet, "/reminders"+tt.query, nil)
+			req.Header.Set("Authorization", "Bearer valid-token")
+			rr := httptest.NewRecorder()
+			a.Routes().ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d (body: %s)", rr.Code, http.StatusOK, rr.Body.String())
+			}
+
+			var got []reminder.Reminder
+			if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+				t.Fatalf("decoding response: %v", err)
+			}
+			gotIDs := []string{}
+			for _, r := range got {
+				gotIDs = append(gotIDs, r.ID)
+			}
+
+			if !slices.Equal(gotIDs, tt.wantIDs) {
+				t.Errorf("reminder IDs = %v, want %v", gotIDs, tt.wantIDs)
 			}
 		})
 	}

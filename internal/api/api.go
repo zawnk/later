@@ -131,6 +131,10 @@ func (a *API) createReminder(w http.ResponseWriter, r *http.Request) {
 func (a *API) listPending(w http.ResponseWriter, r *http.Request) {
 	reminders := a.svc.ListPending()
 
+	if r.URL.Query().Get("q") != "" {
+		reminders = filterByQuery(reminders, r.URL.Query().Get("q"), func(r reminder.Reminder) string { return r.Text })
+	}
+
 	switch sortBy := r.URL.Query().Get("sort"); sortBy {
 	case "", "due":
 		slices.SortFunc(reminders, func(x, y reminder.Reminder) int { return x.DueAt.Compare(y.DueAt) })
@@ -150,6 +154,7 @@ func (a *API) listArchive(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, "failed to load archive", http.StatusInternalServerError)
 		return
 	}
+	reminders = filterByQuery(reminders, r.URL.Query().Get("q"), func(r reminder.ArchivedReminder) string { return r.Text })
 	total := len(reminders)
 
 	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
@@ -167,6 +172,20 @@ func (a *API) listArchive(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("X-Total-Count", strconv.Itoa(total))
 	writeJsonResponse(w, http.StatusOK, reminders)
+}
+
+func filterByQuery[T any](items []T, q string, text func(T) string) []T {
+	if q == "" {
+		return items
+	}
+	q = strings.ToLower(q)
+	filtered := make([]T, 0, len(items))
+	for _, item := range items {
+		if strings.Contains(strings.ToLower(text(item)), q) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
 }
 
 func (a *API) getReminder(w http.ResponseWriter, r *http.Request) {

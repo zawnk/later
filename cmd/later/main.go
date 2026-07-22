@@ -25,6 +25,7 @@ type CLI struct {
 	Create      CreateCmd      `cmd:"" default:"withargs" help:"Create a reminder from free text (no quotes needed). This is the default command."`
 	List        ListCmd        `cmd:"" help:"List pending reminders."`
 	Archive     ArchiveCmd     `cmd:"" help:"List fired (archived) reminders."`
+	Search      SearchCmd      `cmd:"" help:"Search reminder text."`
 	Next        NextCmd        `cmd:"" help:"Show the next upcoming reminder."`
 	Last        LastCmd        `cmd:"" help:"Show the most recently fired reminder."`
 	Cancel      CancelCmd      `cmd:"" help:"Cancel a pending reminder."`
@@ -184,6 +185,60 @@ func (c *ArchiveCmd) Run(a *app) error {
 	}
 	if len(archived) < total {
 		fmt.Fprintf(a.out, "(showing %d of %d, use --limit to adjust)\n", len(archived), total)
+	}
+	return nil
+}
+
+type SearchCmd struct {
+	Text    []string `arg:"" help:"Search query, no quotes needed. Matched as a case-insensitive substring against reminder text."`
+	Pending bool     `help:"Search pending reminders (the default)." xor:"bucket"`
+	Archive bool     `help:"Search archived reminders instead." xor:"bucket"`
+}
+
+func (c *SearchCmd) Run(a *app) error {
+	cl, err := a.client()
+	if err != nil {
+		return err
+	}
+	query := strings.Join(c.Text, " ")
+
+	if c.Archive {
+		archived, err := cl.searchArchive(query)
+		if err != nil {
+			return err
+		}
+		if a.json {
+			if archived == nil {
+				archived = []reminder.ArchivedReminder{}
+			}
+			return a.printJSON(archived)
+		}
+		if len(archived) == 0 {
+			fmt.Fprintln(a.out, "no archived reminders match")
+			return nil
+		}
+		for _, r := range archived {
+			fmt.Fprintf(a.out, "%s  fired %s  %s\n", r.ID, formatTime(r.FiredAt), r.Text)
+		}
+		return nil
+	}
+
+	reminders, err := cl.searchPending(query)
+	if err != nil {
+		return err
+	}
+	if a.json {
+		if reminders == nil {
+			reminders = []reminder.Reminder{}
+		}
+		return a.printJSON(reminders)
+	}
+	if len(reminders) == 0 {
+		fmt.Fprintln(a.out, "no pending reminders match")
+		return nil
+	}
+	for _, r := range reminders {
+		fmt.Fprintf(a.out, "%s  due %s  %s\n", r.ID, formatTime(r.DueAt), r.Text)
 	}
 	return nil
 }

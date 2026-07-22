@@ -142,6 +142,18 @@ func (c *client) listArchive(limit int) (archived []reminder.ArchivedReminder, t
 	return archived, total, nil
 }
 
+func (c *client) searchPending(query string) ([]reminder.Reminder, error) {
+	var reminders []reminder.Reminder
+	err := c.getJSON("/reminders?q="+url.QueryEscape(query), &reminders)
+	return reminders, err
+}
+
+func (c *client) searchArchive(query string) ([]reminder.ArchivedReminder, error) {
+	var archived []reminder.ArchivedReminder
+	err := c.getJSON("/reminders/archive?q="+url.QueryEscape(query), &archived)
+	return archived, err
+}
+
 func (c *client) next() (*reminder.Reminder, error) {
 	var rem reminder.Reminder
 	if err := c.getJSON("/reminders/next", &rem); err != nil {
