@@ -412,6 +412,75 @@ func TestArchiveLimit(t *testing.T) {
 	}
 }
 
+func TestSearch(t *testing.T) {
+	pending := []reminder.Reminder{{ID: "pending-1", Text: "buy milk"}}
+	archived := []reminder.ArchivedReminder{{Reminder: reminder.Reminder{ID: "archived-1", Text: "buy milk"}}}
+
+	var gotPath, gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotQuery = r.URL.Path, r.URL.RawQuery
+		if r.URL.Path == "/reminders/archive" {
+			_ = json.NewEncoder(w).Encode(archived)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(pending)
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "search", "buy", "milk"); err != nil {
+		t.Fatalf(`runCLI("search buy milk") error = %v`, err)
+	}
+
+	if gotPath != "/reminders" {
+		t.Errorf("default search path = %q, want %q (pending)", gotPath, "/reminders")
+	}
+
+	if gotQuery != "q=buy+milk" {
+		t.Errorf("search query = %q, want %q", gotQuery, "q=buy+milk")
+	}
+
+	if !strings.Contains(out.String(), "pending-1") {
+		t.Errorf("search output = %q, want it to contain the pending result", out.String())
+	}
+
+	out.Reset()
+	if err := runCLI(t, a, "search", "milk", "--archive"); err != nil {
+		t.Fatalf(`runCLI("search milk --archive") error = %v`, err)
+	}
+
+	if gotPath != "/reminders/archive" {
+		t.Errorf("--archive search path = %q, want %q", gotPath, "/reminders/archive")
+	}
+
+	if !strings.Contains(out.String(), "archived-1") {
+		t.Errorf("--archive search output = %q, want it to contain the archived result", out.String())
+	}
+
+	if err := runCLI(t, a, "search", "milk", "--pending", "--archive"); err == nil {
+		t.Error(`runCLI("search milk --pending --archive") error = nil, want the xor validation to reject both flags together`)
+	}
+}
+
+func TestSearch_NoMatches(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]reminder.Reminder{})
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "search", "nonexistent"); err != nil {
+		t.Fatalf(`runCLI("search nonexistent") error = %v`, err)
+	}
+	if got := out.String(); got != "no pending reminders match\n" {
+		t.Errorf("no-match output = %q, want the no-match message", got)
+	}
+}
+
 func TestJSONOutput(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 
