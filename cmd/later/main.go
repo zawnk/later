@@ -85,7 +85,7 @@ type CreateCmd struct {
 	Text     []string `arg:"" optional:"" help:"Reminder text, e.g.: later in 3 hours water the plants. When omitted, text is read from piped stdin: echo \"in 3d call xyz\" | later"`
 	Topic    []string `help:"Outbound topic(s) for this reminder, repeatable or comma-separated. Default: the token's default_outbound if configured, otherwise all the token's outbound topics." placeholder:"TOPIC"`
 	Tag      []string `help:"ntfy tag(s) for the notification (emoji shortcodes like partying_face, or plain labels), repeatable or comma-separated." placeholder:"TAG"`
-	Priority string   `short:"p" help:"Notification priority: min, low, default, high, urgent. Late reminders are bumped to at least high." enum:",min,low,default,high,urgent" default:""`
+	Priority string   `short:"p" help:"Notification priority: min, low, default, high, urgent, max. Late reminders are bumped to at least high." enum:",min,low,default,high,urgent,max" default:""`
 	Click    string   `help:"URL the ntfy client opens when the notification is tapped." placeholder:"URL"`
 }
 

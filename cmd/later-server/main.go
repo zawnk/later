@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -85,7 +86,7 @@ func main() {
 	a := api.New(cfg, svc)
 
 	var handler http.Handler = a.Routes()
-	if os.Getenv("LATER_HTTP_LOG") == "1" {
+	if httpLog, _ := strconv.ParseBool(os.Getenv("LATER_HTTP_LOG")); httpLog {
 		slog.Info("HTTP request logger enabled - /healthz probes suppressed")
 		handler = api.LogRequests(handler)
 	}

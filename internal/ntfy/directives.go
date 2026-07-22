@@ -3,6 +3,7 @@ package ntfy
 import (
 	"errors"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/zawnk/later/internal/reminder"
@@ -38,9 +39,7 @@ loop:
 		}
 	}
 
-	for i, j := 0, len(collectedTags)-1; i < j; i, j = i+1, j-1 {
-		collectedTags[i], collectedTags[j] = collectedTags[j], collectedTags[i]
-	}
+	slices.Reverse(collectedTags)
 
 	return strings.Join(tokens[:end], " "), reminder.DedupeStrings(collectedTags), priority, nil
 }

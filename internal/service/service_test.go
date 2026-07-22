@@ -49,6 +49,7 @@ func TestPreprocessDuration(t *testing.T) {
 		{"no longer matches inside a word)", "remind me to check server1h status", "remind me to check server1h status"},
 		{"combined units are no longer this function's job", "2h30m", "2h30m"},
 		{"combined units are no longer this function's job, full combo", "1y2mo3w4d5h6m7s", "1y2mo3w4d5h6m7s"},
+		{"extra whitespace around the unit doesn't leave a double space", "3d  call the plumber", "3 days call the plumber"},
 	}
 
 	for _, tt := range tests {
@@ -56,6 +57,30 @@ func TestPreprocessDuration(t *testing.T) {
 			got := preprocessDuration(tt.in)
 			if got != tt.want {
 				t.Errorf("preprocessDuration(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCollapseWhitespace(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"already single-spaced", "a b c", "a b c"},
+		{"double space", "a  b", "a b"},
+		{"triple space", "a   b", "a b"},
+		{"leading and trailing whitespace", "  a b  ", "a b"},
+		{"tabs and newlines", "a\tb\nc", "a b c"},
+		{"empty string", "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := collapseWhitespace(tt.in)
+			if got != tt.want {
+				t.Errorf("collapseWhitespace(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}
@@ -595,11 +620,11 @@ func TestGet(t *testing.T) {
 		}
 	})
 
-	t.Run("not found returns all nils, no error", func(t *testing.T) {
+	t.Run("not found returns ErrNotFound", func(t *testing.T) {
 		gotPending, gotArchived, err := svc.Get("does-not-exist")
 
-		if err != nil {
-			t.Fatalf("Get() error = %v, want nil", err)
+		if !errors.Is(err, ErrNotFound) {
+			t.Fatalf("Get() error = %v, want ErrNotFound", err)
 		}
 
 		if gotPending != nil || gotArchived != nil {
