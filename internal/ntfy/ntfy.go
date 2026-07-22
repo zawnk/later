@@ -13,9 +13,17 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mergestat/timediff"
+
 	"github.com/zawnk/later/internal/config"
 	"github.com/zawnk/later/internal/reminder"
 )
+
+// ageLineThreshold is the minimum time between a reminder's creation and
+// its firing before the notification gets a "(set X ago)" second line.
+// Below it, the reminder was basically immediate and the age adds no
+// information.
+const ageLineThreshold = time.Hour
 
 type subscriptionMessage struct {
 	Text     string
@@ -65,7 +73,7 @@ type Client struct {
 	cfg             *config.Config
 	publishClient   *http.Client
 	subscribeClient *http.Client
-	reconnectWait   time.Duration // pause between subscribe attempts; overridable so tests don't sleep for real
+	reconnectWait   time.Duration
 }
 
 func New(cfg *config.Config) *Client {
@@ -87,6 +95,11 @@ func (c *Client) Send(ctx context.Context, r reminder.Reminder, late bool) error
 		return fmt.Errorf("reminder %s has no outbound topics", r.ID)
 	}
 
+	text := r.Text
+	if time.Since(r.CreatedAt) >= ageLineThreshold {
+		text += fmt.Sprintf("\n(set %s)", timediff.TimeDiff(r.CreatedAt))
+	}
+
 	for _, topic := range topics {
 		mods := ntfyMessageModifications{
 			title:    "Reminder",
@@ -95,7 +108,7 @@ func (c *Client) Send(ctx context.Context, r reminder.Reminder, late bool) error
 			priority: r.Priority,
 			click:    r.Click,
 		}
-		if err := c.sendToTopic(ctx, r.Text, topic, mods); err != nil {
+		if err := c.sendToTopic(ctx, text, topic, mods); err != nil {
 			return fmt.Errorf("failed to send to topic %s: %w", topic, err)
 		}
 	}

@@ -104,6 +104,7 @@ func TestSend(t *testing.T) {
 		ID:             "abc123",
 		Text:           "buy milk",
 		OutboundTopics: []string{"topic-a"},
+		CreatedAt:      time.Now(),
 	}
 
 	if err := c.Send(context.Background(), r, false); err != nil {
@@ -145,7 +146,7 @@ func TestSend_Late(t *testing.T) {
 	srv, getReqs := recordingServer(t)
 	c := New(testConfig(srv.URL))
 
-	r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}}
+	r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}, CreatedAt: time.Now()}
 	if err := c.Send(context.Background(), r, true); err != nil {
 		t.Fatalf("Send() error = %v", err)
 	}
@@ -162,6 +163,50 @@ func TestSend_Late(t *testing.T) {
 	if got := reqs[0].header.Get("Tags"); got != "warning" {
 		t.Errorf("Tags header = %q, want %q", got, "warning")
 	}
+}
+
+func TestSend_AgeLine(t *testing.T) {
+	t.Run("below the threshold: no age line", func(t *testing.T) {
+		srv, getReqs := recordingServer(t)
+		c := New(testConfig(srv.URL))
+
+		r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}, CreatedAt: time.Now().Add(-30 * time.Minute)}
+		if err := c.Send(context.Background(), r, false); err != nil {
+			t.Fatalf("Send() error = %v", err)
+		}
+
+		if got := getReqs()[0].body; got != "buy milk" {
+			t.Errorf("body = %q, want no age line below the threshold", got)
+		}
+	})
+
+	t.Run("above the threshold: age line appended as a second line", func(t *testing.T) {
+		srv, getReqs := recordingServer(t)
+		c := New(testConfig(srv.URL))
+
+		r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}, CreatedAt: time.Now().Add(-3 * time.Hour)}
+		if err := c.Send(context.Background(), r, false); err != nil {
+			t.Fatalf("Send() error = %v", err)
+		}
+
+		if got := getReqs()[0].body; got != "buy milk\n(set 3 hours ago)" {
+			t.Errorf("body = %q, want %q", got, "buy milk\n(set 3 hours ago)")
+		}
+	})
+
+	t.Run("late prefix wraps the whole thing, age line stays at the end", func(t *testing.T) {
+		srv, getReqs := recordingServer(t)
+		c := New(testConfig(srv.URL))
+
+		r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}, CreatedAt: time.Now().Add(-3 * time.Hour)}
+		if err := c.Send(context.Background(), r, true); err != nil {
+			t.Fatalf("Send() error = %v", err)
+		}
+
+		if got := getReqs()[0].body; got != "DELAYED: buy milk\n(set 3 hours ago)" {
+			t.Errorf("body = %q, want %q", got, "DELAYED: buy milk\n(set 3 hours ago)")
+		}
+	})
 }
 
 func TestSend_Tags(t *testing.T) {
