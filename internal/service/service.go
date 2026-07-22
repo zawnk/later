@@ -185,7 +185,7 @@ func preprocessDuration(s string) string {
 		return fmt.Sprintf("%s %s %s ", parts[1], parts[2], word)
 	})
 
-	return strings.ReplaceAll(strings.TrimSpace(res), "  ", " ")
+	return collapseWhitespace(res)
 }
 
 func collapseWhitespace(s string) string {
@@ -222,7 +222,7 @@ func (s *Service) Get(id string) (*reminder.Reminder, *reminder.ArchivedReminder
 		}
 	}
 
-	return nil, nil, nil
+	return nil, nil, fmt.Errorf("reminder %s %w", id, ErrNotFound)
 }
 
 func (s *Service) Next() *reminder.Reminder {

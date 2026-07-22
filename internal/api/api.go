@@ -3,6 +3,7 @@ package api
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"slices"
 	"strconv"
@@ -172,6 +173,10 @@ func (a *API) getReminder(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	pending, archived, err := a.svc.Get(id)
 
+	if errors.Is(err, service.ErrNotFound) {
+		writeJSONError(w, "reminder not found", http.StatusNotFound)
+		return
+	}
 	if err != nil {
 		writeJSONError(w, "failed to load reminder", http.StatusInternalServerError)
 		return
@@ -181,12 +186,7 @@ func (a *API) getReminder(w http.ResponseWriter, r *http.Request) {
 		writeJsonResponse(w, http.StatusOK, pending)
 		return
 	}
-
-	if archived != nil {
-		writeJsonResponse(w, http.StatusOK, archived)
-		return
-	}
-	writeJSONError(w, "reminder not found", http.StatusNotFound)
+	writeJsonResponse(w, http.StatusOK, archived)
 }
 
 func (a *API) nextReminder(w http.ResponseWriter, r *http.Request) {
