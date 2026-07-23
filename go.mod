@@ -4,6 +4,7 @@ go 1.26.5
 
 require (
 	github.com/alecthomas/kong v1.16.0
+	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/mergestat/timediff v0.0.4
 	github.com/olebedev/when v1.1.0
 	gopkg.in/yaml.v3 v3.0.1

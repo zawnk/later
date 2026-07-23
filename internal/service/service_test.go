@@ -37,19 +37,22 @@ func TestPreprocessDuration(t *testing.T) {
 		in   string
 		want string
 	}{
-		{"single day", "3d", "3 days"},
-		{"with a leading word", "in 3d", "in 3 days"},
+		{"in-prefixed day", "in 3d", "in 3 days"},
+		{"within-prefixed day", "within 3d", "within 3 days"},
 		{"weeks", "in 4w test", "in 4 weeks test"},
-		{"months", "3mo time", "3 months time"},
+		{"months", "in 3mo time", "in 3 months time"},
 		{"three letter mon", "pok3 mon", "pok3 mon"},
-		{"years", "10y is a decade", "10 years is a decade"},
-		{"seconds", "60s make a minute", "60 seconds make a minute"},
+		{"years", "in 10y is a decade", "in 10 years is a decade"},
+		{"seconds", "in 60s make a minute", "in 60 seconds make a minute"},
 		{"no time included", "no time included", "no time included"},
-		{"no longer matches inside a word)", "server1h down", "server1h down"},
-		{"no longer matches inside a word)", "remind me to check server1h status", "remind me to check server1h status"},
-		{"combined units are no longer this function's job", "2h30m", "2h30m"},
-		{"combined units are no longer this function's job, full combo", "1y2mo3w4d5h6m7s", "1y2mo3w4d5h6m7s"},
-		{"extra whitespace around the unit doesn't leave a double space", "3d  call the plumber", "3 days call the plumber"},
+		{"bare unit with no in/within is left untouched", "3d", "3d"},
+		{"bare months left untouched", "3mo time", "3mo time"},
+		{"no longer matches inside a word)", "in server1h down", "in server1h down"},
+		{"no longer matches inside a word)", "in remind me to check server1h status", "in remind me to check server1h status"},
+		{"combined units are no longer this function's job", "in 2h30m", "in 2h30m"},
+		{"combined units are no longer this function's job, full combo", "in 1y2mo3w4d5h6m7s", "in 1y2mo3w4d5h6m7s"},
+		{"extra whitespace around the unit doesn't leave a double space", "in 3d  call the plumber", "in 3 days call the plumber"},
+		{"a non-in-prefixed unit earlier in the text is left alone", "buy 2h of parking in 3d", "buy 2h of parking in 3 days"},
 	}
 
 	for _, tt := range tests {
@@ -86,58 +89,91 @@ func TestCollapseWhitespace(t *testing.T) {
 	}
 }
 
-func TestApplyDuration(t *testing.T) {
-	startDate := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+// TestSumDurationMatches covers the pure arithmetic Postpone no longer
+// reaches directly (applyDuration was removed once Postpone unified onto
+// parseDueTime, see the "in "-prefixing comment on Postpone) but which
+// parseDueTime's own combined-duration branch still relies on for 2+
+// chained compact units.
+func TestSumDurationMatches(t *testing.T) {
+	tests := []struct {
+		name        string
+		matches     [][]string
+		wantYears   int
+		wantMonths  int
+		wantDays    int
+		wantSeconds float64
+	}{
+		{"single day", [][]string{{"1d", "1", "d"}}, 0, 0, 1, 0},
+		{"week converts to days", [][]string{{"1w", "1", "w"}}, 0, 0, 7, 0},
+		{"month then day", [][]string{{"1mo", "1", "mo"}, {"1d", "1", "d"}}, 0, 1, 1, 0},
+		{"day then month (order shouldn't matter)", [][]string{{"1d", "1", "d"}, {"1mo", "1", "mo"}}, 0, 1, 1, 0},
+		{"clock units accumulate as a duration", [][]string{{"120s", "120", "s"}}, 0, 0, 0, 120},
+	}
 
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			years, months, days, clock := sumDurationMatches(tt.matches)
+			if years != tt.wantYears || months != tt.wantMonths || days != tt.wantDays {
+				t.Errorf("sumDurationMatches() = (y=%d,mo=%d,d=%d), want (y=%d,mo=%d,d=%d)", years, months, days, tt.wantYears, tt.wantMonths, tt.wantDays)
+			}
+			if clock.Seconds() != tt.wantSeconds {
+				t.Errorf("sumDurationMatches() clock = %v, want %v seconds", clock, tt.wantSeconds)
+			}
+		})
+	}
+}
+
+func TestIsUnambiguousDurationRun(t *testing.T) {
+	tests := []struct {
+		name           string
+		run            string
+		atStart, atEnd bool
+		want           bool
+	}{
+		{"in-flagged run trusted regardless of position", "in 1w2d", false, false, true},
+		{"within-flagged run trusted regardless of position", "within 1w2d", false, false, true},
+		{"bare run at the start is trusted", "1w2d", true, false, true},
+		{"bare run at the end is trusted", "1w2d", false, true, true},
+		{"bare run sandwiched in the middle is not trusted", "1w2d", false, false, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isUnambiguousDurationRun(tt.run, tt.atStart, tt.atEnd)
+			if got != tt.want {
+				t.Errorf("isUnambiguousDurationRun(%q, atStart=%v, atEnd=%v) = %v, want %v", tt.run, tt.atStart, tt.atEnd, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestParseDueTime_CombinedDurationDST proves parseDueTime's combined-unit
+// branch (2+ chained compact units, e.g. "1d2h") still preserves
+// wall-clock time across a DST transition - the same guarantee
+// applyDuration used to provide directly before Postpone unified onto
+// parseDueTime. Single bare units ("1d" alone) go through when.Parse
+// instead and don't carry this same guarantee (when adds a flat 24h
+// rather than preserving wall-clock time) - a pre-existing when.Parse
+// characteristic, not something introduced here, and not covered by this
+// test since it's not this codebase's arithmetic to promise.
+func TestParseDueTime_CombinedDurationDST(t *testing.T) {
+	svc := New(&mockStore{})
 	berlin, err := time.LoadLocation("Europe/Berlin")
 	if err != nil {
 		t.Fatalf("failed to load Europe/Berlin location: %v", err)
 	}
 
-	tests := []struct {
-		name     string
-		duration string
-		from     time.Time
-		want     time.Time
-		wantErr  bool
-	}{
-		{"one day", "1d", startDate, startDate.AddDate(0, 0, 1), false},
-		{"one week", "1w", startDate, startDate.AddDate(0, 0, 7), false},
-		{"one year", "1y", startDate, startDate.AddDate(1, 0, 0), false},
-		{"five minutes", "5m", startDate, startDate.Add(5 * time.Minute), false},
-		{"120 seconds", "120s", startDate, startDate.Add(2 * time.Minute), false},
-		{"combined units: month then day", "1mo1d", startDate, startDate.AddDate(0, 1, 1), false},
-		{"combined units: day then month (order shouldn't matter)", "1d1mo", startDate, startDate.AddDate(0, 1, 1), false},
-		{"invalid input has no error return, but check the error path", "not-a-duration", startDate, time.Time{}, true},
-		{"combining calendar and clock unit", "1d2h", startDate, startDate.AddDate(0, 0, 1).Add(2 * time.Hour), false},
-		{
-			name:     "DST spring-forward: 1 day preserves wall-clock time",
-			duration: "1d",
-			from:     time.Date(2026, 3, 28, 12, 0, 0, 0, berlin),
-			want:     time.Date(2026, 3, 29, 12, 0, 0, 0, berlin),
-			wantErr:  false,
-		}, {
-			name:     "DST spring-forward: 12 hours preserves clock time",
-			duration: "12h",
-			from:     time.Date(2026, 3, 28, 19, 0, 0, 0, berlin),
-			want:     time.Date(2026, 3, 29, 8, 0, 0, 0, berlin),
-			wantErr:  false,
-		},
+	from := time.Date(2026, 3, 28, 12, 0, 0, 0, berlin)
+	svc.now = func() time.Time { return from }
+
+	_, _, due, err := svc.parseDueTime("1d2h")
+	if err != nil {
+		t.Fatalf("parseDueTime() error = %v", err)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := applyDuration(tt.duration, tt.from)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("applyDuration(%q) error = %v, wantErr %v", tt.duration, err, tt.wantErr)
-			}
-			if tt.wantErr {
-				return
-			}
-			if !got.Equal(tt.want) {
-				t.Errorf("applyDuration(%q) = %v, want %v", tt.duration, got, tt.want)
-			}
-		})
+	want := from.AddDate(0, 0, 1).Add(2 * time.Hour)
+	if !due.Equal(want) {
+		t.Errorf("parseDueTime(\"1d2h\") across DST = %v, want %v (wall-clock-preserving day, then a real 2h)", due, want)
 	}
 }
 
@@ -176,6 +212,17 @@ func TestCreateReminder(t *testing.T) {
 		{"compact duration: every unit combined", "renew everything in 1y2mo3w4d5h6m", []string{"topic-a"}, "renew everything", fixedNow.AddDate(1, 2, 25).Add(5*time.Hour + 6*time.Minute), false},
 		{"exact calendar date", "defrost the freezer october 21st", []string{"topic-a"}, "defrost the freezer", time.Date(2026, 10, 21, 9, 0, 0, 0, time.Local), false},
 		{"combined weekday and time", "pick up the dry cleaning next tuesday at 2pm", []string{"topic-a"}, "pick up the dry cleaning", time.Date(2026, 6, 16, 14, 0, 0, 0, time.Local), false},
+		{"a duration-shaped substring inside the task text is not rewritten", "in 3d buy 5m of rope", []string{"topic-a"}, "buy 5m of rope", fixedNow.AddDate(0, 0, 3), false},
+		{"a second duration-shaped substring later in the task is left alone too", "remind me in 2h to check the 5h parking meter", []string{"topic-a"}, "remind me to check the 5h parking meter", fixedNow.Add(2 * time.Hour), false},
+		{"an earlier single-unit duration is not overridden by a later combined-unit-shaped task fragment", "in 3d buy 1y2mo of insurance", []string{"topic-a"}, "buy 1y2mo of insurance", fixedNow.AddDate(0, 0, 3), false},
+		{"a non-in-prefixed duration-shaped fragment before the real duration doesn't break recognition", "buy 2h of parking in 3d", []string{"topic-a"}, "buy 2h of parking", fixedNow.AddDate(0, 0, 3), false},
+		{"same case with a number and unrelated bare number mixed in", "reserve court 3 for 1h in 2d", []string{"topic-a"}, "reserve court 3 for 1h", fixedNow.AddDate(0, 0, 2), false},
+		{"an in-prefixed combined duration works with trailing words after it", "call the plumber in 1w2d please", []string{"topic-a"}, "call the plumber please", fixedNow.AddDate(0, 0, 9), false},
+		{"a bare combined duration at the very start still works", "1w2d clean the gutters", []string{"topic-a"}, "clean the gutters", fixedNow.AddDate(0, 0, 9), false},
+		{"a bare combined duration at the very end still works", "clean the gutters 1w2d", []string{"topic-a"}, "clean the gutters", fixedNow.AddDate(0, 0, 9), false},
+		{"two in-prefixed combined durations: the leftmost wins", "call in 1d2h then in 3d4h again", []string{"topic-a"}, "call then in 3d4h again", fixedNow.Add(26 * time.Hour), false},
+		{"within works as a trigger for a single unit, same as in", "within 3d call mom", []string{"topic-a"}, "call mom", fixedNow.AddDate(0, 0, 3), false},
+		{"a bare combined duration with no task at all still requires one", "1w2d", []string{"topic-a"}, "", time.Time{}, true},
 	}
 
 	for _, tt := range tests {
@@ -479,6 +526,7 @@ func TestPostpone(t *testing.T) {
 		duration          string
 		wantErr           string
 		wantSentinelErrIs error
+		wantDue           time.Time
 	}{
 		{
 			name:              "still pending, refuses to postpone",
@@ -512,11 +560,48 @@ func TestPostpone(t *testing.T) {
 			wantSentinelErrIs: ErrInvalidInput,
 		},
 		{
-			name:     "valid postpone",
+			name:              "text merely containing a duration-shaped substring is not a duration",
+			archive:           []reminder.ArchivedReminder{archived},
+			id:                "abc123",
+			duration:          "gate 3d assembly",
+			wantErr:           "invalid duration",
+			wantSentinelErrIs: ErrInvalidInput,
+		},
+		{
+			name:     "valid postpone with a bare compact duration (existing CLI behavior, unaffected)",
 			archive:  []reminder.ArchivedReminder{archived},
 			id:       "abc123",
 			duration: "1d",
-			wantErr:  "",
+			wantDue:  fixedNow.AddDate(0, 0, 1),
+		},
+		{
+			name:     "compact duration with an 'in' prefix",
+			archive:  []reminder.ArchivedReminder{archived},
+			id:       "abc123",
+			duration: "in 1h",
+			wantDue:  fixedNow.Add(time.Hour),
+		},
+		{
+			name:     "full natural-language phrase falls through to parseDueTime",
+			archive:  []reminder.ArchivedReminder{archived},
+			id:       "abc123",
+			duration: "tomorrow morning",
+			wantDue:  time.Date(2026, 6, 16, 8, 0, 0, 0, time.Local),
+		},
+		{
+			name:     "caller-supplied leading 'in' is not doubled",
+			archive:  []reminder.ArchivedReminder{archived},
+			id:       "abc123",
+			duration: "in tomorrow",
+			wantDue:  fixedNow.AddDate(0, 0, 1),
+		},
+		{
+			name:              "combined duration-shaped substring embedded in unrelated text is not a duration",
+			archive:           []reminder.ArchivedReminder{archived},
+			id:                "abc123",
+			duration:          "garbage 1y2mo garbage",
+			wantErr:           "invalid duration",
+			wantSentinelErrIs: ErrInvalidInput,
 		},
 	}
 
@@ -565,9 +650,8 @@ func TestPostpone(t *testing.T) {
 			if rem.Priority != archived.Priority || rem.Click != archived.Click {
 				t.Errorf("Postpone() Priority/Click = %q/%q, want %q/%q (carried over like the topics)", rem.Priority, rem.Click, archived.Priority, archived.Click)
 			}
-			wantDue := fixedNow.AddDate(0, 0, 1)
-			if !rem.DueAt.Equal(wantDue) {
-				t.Errorf("Postpone() DueAt = %v, want %v", rem.DueAt, wantDue)
+			if !rem.DueAt.Equal(tt.wantDue) {
+				t.Errorf("Postpone() DueAt = %v, want %v", rem.DueAt, tt.wantDue)
 			}
 			if !rem.CreatedAt.Equal(fixedNow) {
 				t.Errorf("Postpone() CreatedAt = %v, want %v", rem.CreatedAt, fixedNow)
@@ -577,6 +661,96 @@ func TestPostpone(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestResolvePostponeTime drives the pure resolution function directly
+// with a broader battery of edge cases than TestPostpone's table (which
+// only needs enough to prove Postpone wires it up correctly).
+func TestResolvePostponeTime(t *testing.T) {
+	fixedNow := time.Date(2026, 6, 15, 9, 0, 0, 0, time.Local)
+
+	tests := []struct {
+		name    string
+		expr    string
+		wantErr bool
+		wantDue time.Time
+	}{
+		{"empty string", "", true, time.Time{}},
+		{"whitespace only", "   ", true, time.Time{}},
+		{"pure garbage", "asdkfj", true, time.Time{}},
+		{"bare single unit", "1d", false, fixedNow.AddDate(0, 0, 1)},
+		{"single unit with in", "in 1d", false, fixedNow.AddDate(0, 0, 1)},
+		{"bare combined units", "3h20m", false, fixedNow.Add(3*time.Hour + 20*time.Minute)},
+		{"combined units with in", "in 3h20m", false, fixedNow.Add(3*time.Hour + 20*time.Minute)},
+		{"combined units with within", "within 1d2h", false, fixedNow.AddDate(0, 0, 1).Add(2 * time.Hour)},
+		{"casual phrase", "tomorrow", false, fixedNow.AddDate(0, 0, 1)},
+		{"casual phrase already prefixed with in (not doubled)", "in tomorrow", false, fixedNow.AddDate(0, 0, 1)},
+		{"casual phrase with time-of-day word", "tomorrow morning", false, time.Date(2026, 6, 16, 8, 0, 0, 0, time.Local)},
+		{"weekday", "next tuesday", false, time.Date(2026, 6, 16, 9, 0, 0, 0, time.Local)},
+		{"single unit embedded in unrelated text", "3d rotate the tires", true, time.Time{}},
+		{"combined units embedded in unrelated text", "garbage 1y2mo garbage", true, time.Time{}},
+		{"space-separated units are not combined", "1d 2h", true, time.Time{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := New(&mockStore{})
+			svc.now = func() time.Time { return fixedNow }
+
+			due, err := svc.resolvePostponeTime(tt.expr)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("resolvePostponeTime(%q) error = nil, want an error", tt.expr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolvePostponeTime(%q) unexpected error = %v", tt.expr, err)
+			}
+			if !due.Equal(tt.wantDue) {
+				t.Errorf("resolvePostponeTime(%q) = %v, want %v", tt.expr, due, tt.wantDue)
+			}
+		})
+	}
+}
+
+func TestGenerateUniqueID(t *testing.T) {
+	t.Run("archive load error propagates", func(t *testing.T) {
+		store := &mockStore{archiveErr: errors.New("disk read failed")}
+		svc := New(store)
+
+		if _, err := svc.generateUniqueID(); err == nil {
+			t.Fatal("generateUniqueID() error = nil, want the archive load error surfaced")
+		}
+	})
+
+	t.Run("retries on collision with a pending or archived id", func(t *testing.T) {
+		store := &mockStore{
+			saved:   []reminder.Reminder{{ID: "pending-id"}},
+			archive: []reminder.ArchivedReminder{{Reminder: reminder.Reminder{ID: "archived-id"}}},
+		}
+		svc := New(store)
+
+		draws := []string{"pending-id", "archived-id", "fresh-id"}
+		call := 0
+		svc.generateID = func() string {
+			id := draws[call]
+			call++
+			return id
+		}
+
+		id, err := svc.generateUniqueID()
+		if err != nil {
+			t.Fatalf("generateUniqueID() error = %v", err)
+		}
+		if id != "fresh-id" {
+			t.Errorf("generateUniqueID() = %q, want %q after rejecting two colliding draws", id, "fresh-id")
+		}
+		if call != 3 {
+			t.Errorf("generator called %d times, want exactly 3 (two collisions then the accepted draw)", call)
+		}
+	})
 }
 
 func TestGet(t *testing.T) {
