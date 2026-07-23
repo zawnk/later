@@ -527,6 +527,89 @@ func TestJSONOutput(t *testing.T) {
 	}
 }
 
+func TestTestParse(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/test/parse" {
+			t.Errorf("request = %s %s, want POST /test/parse", r.Method, r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		_ = json.NewEncoder(w).Encode(struct {
+			Text  string    `json:"text"`
+			DueAt time.Time `json:"due_at"`
+		}{Text: "go to bed", DueAt: time.Date(2026, 6, 16, 2, 0, 0, 0, time.UTC)})
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "test", "parse", "tomorrow", "at", "2am", "go", "to", "bed"); err != nil {
+		t.Fatalf("runCLI() error = %v", err)
+	}
+
+	if gotBody != `{"text":"tomorrow at 2am go to bed"}` {
+		t.Errorf("server received body %s, want the args joined into text", gotBody)
+	}
+
+	if !strings.Contains(out.String(), "go to bed") {
+		t.Errorf("output = %q, want it to contain the previewed task text", out.String())
+	}
+}
+
+func TestTestParse_JSON(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(struct {
+			Text  string    `json:"text"`
+			DueAt time.Time `json:"due_at"`
+		}{Text: "go to bed", DueAt: time.Date(2026, 6, 16, 2, 0, 0, 0, time.UTC)})
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "test", "parse", "tomorrow", "at", "2am", "go", "to", "bed", "--json"); err != nil {
+		t.Fatalf(`runCLI(..., "--json") error = %v`, err)
+	}
+
+	var got struct {
+		Text  string    `json:"text"`
+		DueAt time.Time `json:"due_at"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("--json output is not valid JSON: %v; output: %q", err, out.String())
+	}
+	if got.Text != "go to bed" {
+		t.Errorf("--json output = %+v, want Text = %q", got, "go to bed")
+	}
+}
+
+func TestTestParse_ServerRejectionSurfacesRealReason(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid input: no time information found in: \"buy eggs\""}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	err := runCLI(t, a, "test", "parse", "buy", "eggs")
+	if err == nil {
+		t.Fatal("runCLI() error = nil, want the server's rejection reason surfaced")
+	}
+	if !strings.Contains(err.Error(), "no time information found") {
+		t.Errorf("error = %q, want the real parse failure reason", err)
+	}
+}
+
 func TestCreateWithTopics(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 
