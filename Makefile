@@ -64,6 +64,13 @@ lint: ## golangci-lint (part of `check`; from PATH or mise, same resolution as $
 .PHONY: check
 check: fmt-check vet lint race ## everything CI would run: fmt-check + vet + lint + race tests
 
+FUZZTIME ?= 30s
+
+.PHONY: fuzz
+fuzz: ## run both parser fuzz targets for FUZZTIME each (default 30s; override: make fuzz FUZZTIME=5m) - not part of CI/check, run manually before releasing anything that touches the NL parser
+	$(GO) test ./internal/service/ -fuzz=FuzzPreprocessDuration -fuzztime=$(FUZZTIME)
+	$(GO) test ./internal/service/ -fuzz=FuzzParseReminderText -fuzztime=$(FUZZTIME)
+
 .PHONY: tidy
 tidy: ## go mod tidy
 	$(GO) mod tidy
