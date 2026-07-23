@@ -16,13 +16,14 @@ import (
 )
 
 type API struct {
-	cfg          *config.Config
-	svc          *service.Service
-	actionSecret []byte
+	cfg              *config.Config
+	svc              *service.Service
+	actionSecret     []byte
+	actionTokensUsed *actiontoken.UsedTracker
 }
 
 func New(cfg *config.Config, svc *service.Service, actionSecret []byte) *API {
-	return &API{cfg: cfg, svc: svc, actionSecret: actionSecret}
+	return &API{cfg: cfg, svc: svc, actionSecret: actionSecret, actionTokensUsed: actiontoken.NewUsedTracker()}
 }
 
 func (a *API) Routes() *http.ServeMux {
@@ -48,6 +49,11 @@ func (a *API) Routes() *http.ServeMux {
 // ever verifies against actionTokenScope == "postpone", so it can't
 // authenticate anywhere else no matter how many routes share this one
 // function, since each route declares its own expected scope explicitly.
+// An action token is also single-use (via actionTokensUsed) - both of a
+// reminder's action buttons share one minted token, and the same
+// notification can land on more than one subscribed device, so without
+// this a second tap (another button, another device) would silently
+// postpone the same reminder twice.
 func (a *API) auth(next http.HandlerFunc, actionTokenScope string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		presented, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -63,7 +69,11 @@ func (a *API) auth(next http.HandlerFunc, actionTokenScope string) http.HandlerF
 		}
 
 		if actionTokenScope != "" {
-			if _, err := actiontoken.Verify(a.actionSecret, presented, r.PathValue("id"), actionTokenScope); err == nil {
+			if claims, err := actiontoken.Verify(a.actionSecret, presented, r.PathValue("id"), actionTokenScope); err == nil {
+				if !a.actionTokensUsed.MarkUsed(claims.ID, claims.ExpiresAt.Time) {
+					writeJSONError(w, "action token already used", http.StatusUnauthorized)
+					return
+				}
 				next(w, r)
 				return
 			}

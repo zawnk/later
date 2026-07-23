@@ -516,6 +516,32 @@ func TestPostponeReminder(t *testing.T) {
 		}
 	})
 
+	t.Run("a used action token cannot be replayed - e.g. the other button on the same notification, or a second device on the same topic", func(t *testing.T) {
+		store := newStore()
+		a := New(cfg, service.New(store), testActionSecret)
+
+		token, err := actiontoken.Mint(testActionSecret, "abc123", "postpone")
+		if err != nil {
+			t.Fatalf("Mint() error = %v", err)
+		}
+
+		first := httptest.NewRequest(http.MethodPost, "/reminders/abc123/postpone?duration=in+1h", nil)
+		first.Header.Set("Authorization", "Bearer "+token)
+		rr := httptest.NewRecorder()
+		a.Routes().ServeHTTP(rr, first)
+		if rr.Code != http.StatusCreated {
+			t.Fatalf("first use: status = %d, want %d (body: %s)", rr.Code, http.StatusCreated, rr.Body.String())
+		}
+
+		replay := httptest.NewRequest(http.MethodPost, "/reminders/abc123/postpone?duration=tomorrow+morning", nil)
+		replay.Header.Set("Authorization", "Bearer "+token)
+		rr = httptest.NewRecorder()
+		a.Routes().ServeHTTP(rr, replay)
+		if rr.Code != http.StatusUnauthorized {
+			t.Errorf("replay: status = %d, want %d (body: %s)", rr.Code, http.StatusUnauthorized, rr.Body.String())
+		}
+	})
+
 	t.Run("action token scoped to a different reminder id is rejected", func(t *testing.T) {
 		a := New(cfg, service.New(newStore()), testActionSecret)
 
