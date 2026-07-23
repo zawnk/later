@@ -57,6 +57,10 @@ func TestMintAndVerify(t *testing.T) {
 	if claims.ReminderID != "abc123" || claims.Action != "postpone" {
 		t.Errorf("claims = %+v, want fields matching what was minted", claims)
 	}
+
+	if claims.ID == "" {
+		t.Error("claims.ID (jti) is empty, want a random id so UsedTracker can dedupe")
+	}
 }
 
 func TestVerify_WrongReminderID(t *testing.T) {
@@ -122,4 +126,45 @@ func TestVerify_RejectsAlgNone(t *testing.T) {
 	} else if !strings.Contains(err.Error(), "invalid action token") {
 		t.Errorf("Verify() error = %q, want it to say the token itself is invalid", err)
 	}
+}
+
+func TestUsedTracker(t *testing.T) {
+	t.Run("first use is accepted, replay is rejected", func(t *testing.T) {
+		tr := NewUsedTracker()
+		exp := time.Now().Add(time.Hour)
+
+		if !tr.MarkUsed("jti-1", exp) {
+			t.Fatal("MarkUsed() first call = false, want true")
+		}
+
+		if tr.MarkUsed("jti-1", exp) {
+			t.Error("MarkUsed() replay of the same jti = true, want false (already used)")
+		}
+	})
+
+	t.Run("different jtis don't interfere with each other", func(t *testing.T) {
+		tr := NewUsedTracker()
+		exp := time.Now().Add(time.Hour)
+
+		if !tr.MarkUsed("jti-a", exp) {
+			t.Fatal("MarkUsed(jti-a) = false, want true")
+		}
+
+		if !tr.MarkUsed("jti-b", exp) {
+			t.Error("MarkUsed(jti-b) = false, want true (unrelated jti, first use)")
+		}
+	})
+
+	t.Run("an expired entry is swept and its jti can be reused", func(t *testing.T) {
+		tr := NewUsedTracker()
+		alreadyExpired := time.Now().Add(-time.Minute)
+
+		if !tr.MarkUsed("jti-1", alreadyExpired) {
+			t.Fatal("MarkUsed() first call = false, want true")
+		}
+
+		if !tr.MarkUsed("jti-1", time.Now().Add(time.Hour)) {
+			t.Error("MarkUsed() after the prior entry expired = false, want true (swept, not still blocked)")
+		}
+	})
 }

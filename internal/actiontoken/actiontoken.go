@@ -7,9 +7,11 @@ package actiontoken
 
 import (
 	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -19,6 +21,7 @@ const (
 	secretFileName = "action_secret"
 	secretFileMode = 0600
 	secretSize     = 32
+	jtiSize        = 16
 	expiry         = 72 * time.Hour
 )
 
@@ -59,16 +62,32 @@ func LoadOrCreateSecret(dataDir string) ([]byte, error) {
 // Reminders only ever fire once (see internal/scheduler) with no retry, so
 // this has to stay long enough to cover a notification going unseen over a
 // weekend; shorter would silently kill the buttons with no way to retry
-// beyond falling back to the CLI/API.
+// beyond falling back to the CLI/API. Carries a random jti so a
+// UsedTracker can enforce single use despite the long expiry - see
+// UsedTracker's doc comment.
 func Mint(secret []byte, reminderID, action string) (string, error) {
+	jti, err := newJTI()
+	if err != nil {
+		return "", fmt.Errorf("generating token id: %w", err)
+	}
+
 	claims := Claims{
 		RegisteredClaims: jwt.RegisteredClaims{
+			ID:        jti,
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(expiry)),
 		},
 		ReminderID: reminderID,
 		Action:     action,
 	}
 	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(secret)
+}
+
+func newJTI() (string, error) {
+	b := make([]byte, jtiSize)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // Verify checks tokenString's signature and expiry, then confirms it's
@@ -92,4 +111,46 @@ func Verify(secret []byte, tokenString, wantReminderID, wantAction string) (*Cla
 	}
 
 	return &claims, nil
+}
+
+// UsedTracker enforces single-use action tokens in memory: two of ntfy's
+// own action buttons share one minted token (only the duration query
+// param differs), and a notification can be delivered to more than one
+// subscriber/device on the same topic, so clear=true alone can't prevent
+// a second tap - on another device, or the other button on the same
+// notification - from postponing the same reminder twice. Deliberately
+// not persisted: a restart losing track of a few recently-used tokens
+// within their remaining window is an acceptable, low-stakes gap for a
+// homelab app, and not worth a datastore for.
+type UsedTracker struct {
+	mu   sync.Mutex
+	used map[string]time.Time
+}
+
+func NewUsedTracker() *UsedTracker {
+	return &UsedTracker{used: make(map[string]time.Time)}
+}
+
+// MarkUsed records jti as used until expiresAt and reports whether this is
+// the first time it's been seen; a jti already marked used (and not yet
+// expired) returns false. No background cleanup loop: expired entries are
+// opportunistically swept on every call instead, since the map only ever
+// holds tokens still within their (at most 72h) expiry, which stays small
+// at homelab scale.
+func (t *UsedTracker) MarkUsed(jti string, expiresAt time.Time) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	now := time.Now()
+	for id, exp := range t.used {
+		if now.After(exp) {
+			delete(t.used, id)
+		}
+	}
+
+	if exp, seen := t.used[jti]; seen && now.Before(exp) {
+		return false
+	}
+	t.used[jti] = expiresAt
+	return true
 }

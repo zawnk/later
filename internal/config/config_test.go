@@ -128,6 +128,9 @@ func TestValidate(t *testing.T) {
 		{"base_url with scheme but no host is rejected", func(c *Config) { c.Server.BaseURL = "https://" }, "server.base_url is not an absolute URL"},
 		{"base_url with IP:port and a path but no scheme is rejected clearly, not silently mangled", func(c *Config) { c.Server.BaseURL = "192.168.1.53:8080/api" }, "server.base_url is not an absolute URL"},
 		{"base_url with hostname:port and a path but no scheme is rejected clearly, not silently mangled", func(c *Config) { c.Server.BaseURL = "later-server:8080/api" }, "server.base_url is not an absolute URL"},
+		{"base_url with a query string is rejected, not silently concatenated into a broken callback URL later", func(c *Config) { c.Server.BaseURL = "https://later.example.com/?foo=1" }, "must not contain a query string or fragment"},
+		{"base_url with a fragment is rejected for the same reason", func(c *Config) { c.Server.BaseURL = "https://later.example.com#frag" }, "must not contain a query string or fragment"},
+		{"base_url with a path and no query/fragment is still valid", func(c *Config) { c.Server.BaseURL = "https://later.example.com/api" }, ""},
 
 		{"no auth_tokens and no inbound", func(c *Config) { c.AuthTokens = nil }, "configure at least one"},
 		{

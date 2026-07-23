@@ -113,6 +113,9 @@ func (c *Config) validate() error {
 		if err != nil || u.Scheme == "" || u.Host == "" {
 			return fmt.Errorf("server.base_url is not an absolute URL: %q", c.Server.BaseURL)
 		}
+		if u.RawQuery != "" || u.Fragment != "" {
+			return fmt.Errorf("server.base_url must not contain a query string or fragment: %q", c.Server.BaseURL)
+		}
 	}
 
 	if strings.TrimSpace(c.Ntfy.Token) == "" {
