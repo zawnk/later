@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -12,6 +13,8 @@ import (
 )
 
 const minTokenLength = 16
+
+var hostPortRegex = regexp.MustCompile(`:\d+$`)
 
 type Config struct {
 	Server     ServerConfig `yaml:"server"`
@@ -77,6 +80,22 @@ func (c *Config) applyDefaults() {
 	}
 }
 
+// NormalizedBaseURL returns raw with "http://" prepended if it's a bare
+// "host:port" with no scheme (e.g. "192.168.1.53:8080") and otherwise unchanged.
+// Exported so internal/ntfy can build a real, usable callback URL from
+// Server.BaseURL at send time — validate() below uses the same function
+// to check acceptability, so both agree on exactly what counts as valid
+// without BaseURL itself ever needing to be mutated/stored normalized.
+func NormalizedBaseURL(raw string) string {
+	if u, err := url.Parse(raw); err == nil && u.Scheme != "" && u.Host != "" {
+		return raw
+	}
+	if hostPortRegex.MatchString(raw) {
+		return "http://" + raw
+	}
+	return raw
+}
+
 func (c *Config) validate() error {
 	if c.Server.Port < 1 || c.Server.Port > 65535 {
 		return fmt.Errorf("server.port: must be 1-65535, got %d", c.Server.Port)
@@ -87,6 +106,16 @@ func (c *Config) validate() error {
 	}
 	if _, err := url.Parse(c.Ntfy.Server); err != nil {
 		return fmt.Errorf("ntfy.server is not a valid URL: %w", err)
+	}
+
+	if c.Server.BaseURL != "" {
+		u, err := url.Parse(NormalizedBaseURL(c.Server.BaseURL))
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return fmt.Errorf("server.base_url is not an absolute URL: %q", c.Server.BaseURL)
+		}
+		if u.RawQuery != "" || u.Fragment != "" {
+			return fmt.Errorf("server.base_url must not contain a query string or fragment: %q", c.Server.BaseURL)
+		}
 	}
 
 	if strings.TrimSpace(c.Ntfy.Token) == "" {

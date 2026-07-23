@@ -10,10 +10,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zawnk/later/internal/actiontoken"
 	"github.com/zawnk/later/internal/config"
 	"github.com/zawnk/later/internal/reminder"
 	"github.com/zawnk/later/internal/service"
 )
+
+var testActionSecret = []byte("test-action-secret")
 
 func TestFilterAllowed(t *testing.T) {
 	tests := []struct {
@@ -130,7 +133,7 @@ func TestAuth(t *testing.T) {
 			{Token: "valid-token", Outbound: []string{"topic-a"}},
 		},
 	}
-	a := New(cfg, nil)
+	a := New(cfg, nil, testActionSecret)
 
 	var (
 		called          bool
@@ -167,7 +170,7 @@ func TestAuth(t *testing.T) {
 			}
 			rr := httptest.NewRecorder()
 
-			a.auth(next)(rr, req)
+			a.auth(next, "")(rr, req)
 
 			if rr.Code != tt.wantStatus {
 				t.Errorf("status = %d, want %d", rr.Code, tt.wantStatus)
@@ -266,7 +269,7 @@ func TestCreateReminder_TopicScoping(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := &stubStore{}
-			a := New(cfg, service.New(store))
+			a := New(cfg, service.New(store), testActionSecret)
 
 			req := httptest.NewRequest(http.MethodPost, "/reminders", strings.NewReader(tt.body))
 			req.Header.Set("Authorization", "Bearer "+tt.token)
@@ -332,7 +335,7 @@ func TestListArchive_Limit(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := &stubStore{archive: archive}
-			a := New(cfg, service.New(store))
+			a := New(cfg, service.New(store), testActionSecret)
 
 			req := httptest.NewRequest(http.MethodGet, "/reminders/archive"+tt.query, nil)
 			req.Header.Set("Authorization", "Bearer valid-token")
@@ -394,7 +397,7 @@ func TestListArchive_Search(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := &stubStore{archive: slices.Clone(archive)}
-			a := New(cfg, service.New(store))
+			a := New(cfg, service.New(store), testActionSecret)
 
 			req := httptest.NewRequest(http.MethodGet, "/reminders/archive"+tt.query, nil)
 			req.Header.Set("Authorization", "Bearer valid-token")
@@ -425,6 +428,139 @@ func TestListArchive_Search(t *testing.T) {
 	}
 }
 
+func TestPostponeReminder(t *testing.T) {
+	cfg := &config.Config{
+		AuthTokens: []config.Token{{Token: "valid-token", Outbound: []string{"topic-a"}}},
+	}
+	archived := reminder.ArchivedReminder{
+		Reminder: reminder.Reminder{ID: "abc123", Text: "buy milk", OutboundTopics: []string{"topic-a"}},
+	}
+
+	newStore := func() *stubStore { return &stubStore{archive: []reminder.ArchivedReminder{archived}} }
+
+	t.Run("real token: unchanged behavior", func(t *testing.T) {
+		a := New(cfg, service.New(newStore()), testActionSecret)
+
+		req := httptest.NewRequest(http.MethodPost, "/reminders/abc123/postpone?duration=1d", nil)
+		req.Header.Set("Authorization", "Bearer valid-token")
+		rr := httptest.NewRecorder()
+		a.Routes().ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusCreated {
+			t.Fatalf("status = %d, want %d (body: %s)", rr.Code, http.StatusCreated, rr.Body.String())
+		}
+	})
+
+	t.Run("real token without duration is a 400", func(t *testing.T) {
+		a := New(cfg, service.New(newStore()), testActionSecret)
+
+		req := httptest.NewRequest(http.MethodPost, "/reminders/abc123/postpone", nil)
+		req.Header.Set("Authorization", "Bearer valid-token")
+		rr := httptest.NewRecorder()
+		a.Routes().ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("no Authorization header is a 401", func(t *testing.T) {
+		a := New(cfg, service.New(newStore()), testActionSecret)
+
+		req := httptest.NewRequest(http.MethodPost, "/reminders/abc123/postpone?duration=1d", nil)
+		rr := httptest.NewRecorder()
+		a.Routes().ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusUnauthorized {
+			t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+		}
+	})
+
+	t.Run("garbage bearer value (neither a real token nor a valid action token) is a 401", func(t *testing.T) {
+		a := New(cfg, service.New(newStore()), testActionSecret)
+
+		req := httptest.NewRequest(http.MethodPost, "/reminders/abc123/postpone?duration=1d", nil)
+		req.Header.Set("Authorization", "Bearer complete-nonsense")
+		rr := httptest.NewRecorder()
+		a.Routes().ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusUnauthorized {
+			t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+		}
+	})
+
+	t.Run("valid jwt token for this reminder succeeds, duration accepts a natural-language phrase", func(t *testing.T) {
+		store := newStore()
+		a := New(cfg, service.New(store), testActionSecret)
+
+		token, err := actiontoken.Mint(testActionSecret, "abc123", "postpone")
+		if err != nil {
+			t.Fatalf("Mint() error = %v", err)
+		}
+
+		req := httptest.NewRequest(http.MethodPost, "/reminders/abc123/postpone?duration=in+1h", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rr := httptest.NewRecorder()
+		a.Routes().ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusCreated {
+			t.Fatalf("status = %d, want %d (body: %s)", rr.Code, http.StatusCreated, rr.Body.String())
+		}
+
+		var rem reminder.Reminder
+		if err := json.NewDecoder(rr.Body).Decode(&rem); err != nil {
+			t.Fatalf("decoding response: %v", err)
+		}
+		if rem.Text != "buy milk" {
+			t.Errorf("Text = %q, want %q (carried over from the archived record, not the token)", rem.Text, "buy milk")
+		}
+	})
+
+	t.Run("a used action token cannot be replayed - e.g. the other button on the same notification, or a second device on the same topic", func(t *testing.T) {
+		store := newStore()
+		a := New(cfg, service.New(store), testActionSecret)
+
+		token, err := actiontoken.Mint(testActionSecret, "abc123", "postpone")
+		if err != nil {
+			t.Fatalf("Mint() error = %v", err)
+		}
+
+		first := httptest.NewRequest(http.MethodPost, "/reminders/abc123/postpone?duration=in+1h", nil)
+		first.Header.Set("Authorization", "Bearer "+token)
+		rr := httptest.NewRecorder()
+		a.Routes().ServeHTTP(rr, first)
+		if rr.Code != http.StatusCreated {
+			t.Fatalf("first use: status = %d, want %d (body: %s)", rr.Code, http.StatusCreated, rr.Body.String())
+		}
+
+		replay := httptest.NewRequest(http.MethodPost, "/reminders/abc123/postpone?duration=tomorrow+morning", nil)
+		replay.Header.Set("Authorization", "Bearer "+token)
+		rr = httptest.NewRecorder()
+		a.Routes().ServeHTTP(rr, replay)
+		if rr.Code != http.StatusUnauthorized {
+			t.Errorf("replay: status = %d, want %d (body: %s)", rr.Code, http.StatusUnauthorized, rr.Body.String())
+		}
+	})
+
+	t.Run("action token scoped to a different reminder id is rejected", func(t *testing.T) {
+		a := New(cfg, service.New(newStore()), testActionSecret)
+
+		token, err := actiontoken.Mint(testActionSecret, "some-other-id", "postpone")
+		if err != nil {
+			t.Fatalf("Mint() error = %v", err)
+		}
+
+		req := httptest.NewRequest(http.MethodPost, "/reminders/abc123/postpone", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rr := httptest.NewRecorder()
+		a.Routes().ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusUnauthorized {
+			t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+		}
+	})
+}
+
 func TestGetReminder(t *testing.T) {
 	cfg := &config.Config{
 		AuthTokens: []config.Token{{Token: "valid-token", Outbound: []string{"topic-a"}}},
@@ -433,7 +569,7 @@ func TestGetReminder(t *testing.T) {
 		pending: []reminder.Reminder{{ID: "pending-1", Text: "buy milk"}},
 		archive: []reminder.ArchivedReminder{{Reminder: reminder.Reminder{ID: "archived-1", Text: "call mom"}}},
 	}
-	a := New(cfg, service.New(store))
+	a := New(cfg, service.New(store), testActionSecret)
 
 	t.Run("finds a pending reminder", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/reminders/pending-1", nil)
@@ -500,7 +636,7 @@ func TestGetReminder(t *testing.T) {
 				{Reminder: reminder.Reminder{ID: "real-last"}},
 			},
 		}
-		collisionAPI := New(cfg, service.New(collisionStore))
+		collisionAPI := New(cfg, service.New(collisionStore), testActionSecret)
 
 		get := func(path string) *httptest.ResponseRecorder {
 			req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -594,7 +730,7 @@ func TestListPending_Sort(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := &stubStore{pending: slices.Clone(pending)}
-			a := New(cfg, service.New(store))
+			a := New(cfg, service.New(store), testActionSecret)
 
 			req := httptest.NewRequest(http.MethodGet, "/reminders"+tt.query, nil)
 			req.Header.Set("Authorization", "Bearer valid-token")
@@ -645,7 +781,7 @@ func TestListPending_Search(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := &stubStore{pending: slices.Clone(pending)}
-			a := New(cfg, service.New(store))
+			a := New(cfg, service.New(store), testActionSecret)
 
 			req := httptest.NewRequest(http.MethodGet, "/reminders"+tt.query, nil)
 			req.Header.Set("Authorization", "Bearer valid-token")

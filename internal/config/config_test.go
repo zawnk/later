@@ -7,6 +7,30 @@ import (
 	"testing"
 )
 
+func TestNormalizedBaseURL(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"already absolute, unchanged", "https://later.example.com", "https://later.example.com"},
+		{"bare IP:port gets http:// prepended", "192.168.1.53:8080", "http://192.168.1.53:8080"},
+		{"bare hostname:port gets http:// prepended", "later-server:8080", "http://later-server:8080"},
+		{"bare hostname with no port is left unchanged (ambiguous, not our call to guess)", "later.example.com", "later.example.com"},
+		{"scheme with no host is left unchanged (still invalid, not our job to fix)", "https://", "https://"},
+		{"bare IP:port with a path is left unchanged (url.Parse already errors on it, validate() rejects it clearly)", "192.168.1.53:8080/api", "192.168.1.53:8080/api"},
+		{"bare hostname:port with a path is left unchanged (Go parses the hostname as a scheme, validate() rejects it clearly)", "later-server:8080/api", "later-server:8080/api"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := NormalizedBaseURL(tt.in); got != tt.want {
+				t.Errorf("NormalizedBaseURL(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestApplyDefaults(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -96,6 +120,17 @@ func TestValidate(t *testing.T) {
 			mutate:  func(c *Config) { c.Ntfy.Server = "http://ex\x7fample.com" },
 			wantErr: "not a valid URL",
 		},
+
+		{"empty base_url is fine (feature just stays off)", func(c *Config) { c.Server.BaseURL = "" }, ""},
+		{"base_url with scheme and host is valid", func(c *Config) { c.Server.BaseURL = "https://later.example.com" }, ""},
+		{"base_url with IP and port is valid", func(c *Config) { c.Server.BaseURL = "192.168.1.53:8080" }, ""},
+		{"base_url with no scheme is rejected", func(c *Config) { c.Server.BaseURL = "later.example.com" }, "server.base_url is not an absolute URL"},
+		{"base_url with scheme but no host is rejected", func(c *Config) { c.Server.BaseURL = "https://" }, "server.base_url is not an absolute URL"},
+		{"base_url with IP:port and a path but no scheme is rejected clearly, not silently mangled", func(c *Config) { c.Server.BaseURL = "192.168.1.53:8080/api" }, "server.base_url is not an absolute URL"},
+		{"base_url with hostname:port and a path but no scheme is rejected clearly, not silently mangled", func(c *Config) { c.Server.BaseURL = "later-server:8080/api" }, "server.base_url is not an absolute URL"},
+		{"base_url with a query string is rejected, not silently concatenated into a broken callback URL later", func(c *Config) { c.Server.BaseURL = "https://later.example.com/?foo=1" }, "must not contain a query string or fragment"},
+		{"base_url with a fragment is rejected for the same reason", func(c *Config) { c.Server.BaseURL = "https://later.example.com#frag" }, "must not contain a query string or fragment"},
+		{"base_url with a path and no query/fragment is still valid", func(c *Config) { c.Server.BaseURL = "https://later.example.com/api" }, ""},
 
 		{"no auth_tokens and no inbound", func(c *Config) { c.AuthTokens = nil }, "configure at least one"},
 		{

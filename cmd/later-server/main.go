@@ -14,6 +14,7 @@ import (
 	"time"
 	_ "time/tzdata"
 
+	"github.com/zawnk/later/internal/actiontoken"
 	"github.com/zawnk/later/internal/api"
 	"github.com/zawnk/later/internal/config"
 	"github.com/zawnk/later/internal/ntfy"
@@ -51,11 +52,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	actionSecret, err := actiontoken.LoadOrCreateSecret(cfg.Server.DataDir)
+	if err != nil {
+		slog.Error("failed to load or create action token secret", "err", err)
+		os.Exit(1)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	svc := service.New(s)
-	ntfyClient := ntfy.New(cfg)
+	ntfyClient := ntfy.New(cfg, actionSecret)
 
 	var wg sync.WaitGroup
 
@@ -83,7 +90,7 @@ func main() {
 	}()
 
 	// start API
-	a := api.New(cfg, svc)
+	a := api.New(cfg, svc, actionSecret)
 
 	var handler http.Handler = a.Routes()
 	if httpLog, _ := strconv.ParseBool(os.Getenv("LATER_HTTP_LOG")); httpLog {

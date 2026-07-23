@@ -6,15 +6,19 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/zawnk/later/internal/actiontoken"
 	"github.com/zawnk/later/internal/config"
 	"github.com/zawnk/later/internal/reminder"
 )
+
+var testActionSecret = []byte("test-action-secret")
 
 type recordedRequest struct {
 	method string
@@ -73,7 +77,7 @@ type createCall struct {
 }
 
 func TestResolveOutbound(t *testing.T) {
-	c := New(testConfig("http://irrelevant"))
+	c := New(testConfig("http://irrelevant"), testActionSecret)
 
 	tests := []struct {
 		name  string
@@ -98,7 +102,7 @@ func TestResolveOutbound(t *testing.T) {
 func TestSend(t *testing.T) {
 	srv, getReqs := recordingServer(t)
 	cfg := testConfig(srv.URL)
-	c := New(cfg)
+	c := New(cfg, testActionSecret)
 
 	r := reminder.Reminder{
 		ID:             "abc123",
@@ -144,7 +148,7 @@ func TestSend(t *testing.T) {
 
 func TestSend_Late(t *testing.T) {
 	srv, getReqs := recordingServer(t)
-	c := New(testConfig(srv.URL))
+	c := New(testConfig(srv.URL), testActionSecret)
 
 	r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}, CreatedAt: time.Now()}
 	if err := c.Send(context.Background(), r, true); err != nil {
@@ -168,7 +172,7 @@ func TestSend_Late(t *testing.T) {
 func TestSend_AgeLine(t *testing.T) {
 	t.Run("below the threshold: no age line", func(t *testing.T) {
 		srv, getReqs := recordingServer(t)
-		c := New(testConfig(srv.URL))
+		c := New(testConfig(srv.URL), testActionSecret)
 
 		r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}, CreatedAt: time.Now().Add(-30 * time.Minute)}
 		if err := c.Send(context.Background(), r, false); err != nil {
@@ -182,7 +186,7 @@ func TestSend_AgeLine(t *testing.T) {
 
 	t.Run("above the threshold: age line appended as a second line", func(t *testing.T) {
 		srv, getReqs := recordingServer(t)
-		c := New(testConfig(srv.URL))
+		c := New(testConfig(srv.URL), testActionSecret)
 
 		r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}, CreatedAt: time.Now().Add(-3 * time.Hour)}
 		if err := c.Send(context.Background(), r, false); err != nil {
@@ -196,7 +200,7 @@ func TestSend_AgeLine(t *testing.T) {
 
 	t.Run("late prefix wraps the whole thing, age line stays at the end", func(t *testing.T) {
 		srv, getReqs := recordingServer(t)
-		c := New(testConfig(srv.URL))
+		c := New(testConfig(srv.URL), testActionSecret)
 
 		r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}, CreatedAt: time.Now().Add(-3 * time.Hour)}
 		if err := c.Send(context.Background(), r, true); err != nil {
@@ -205,6 +209,81 @@ func TestSend_AgeLine(t *testing.T) {
 
 		if got := getReqs()[0].body; got != "DELAYED: buy milk\n(set 3 hours ago)" {
 			t.Errorf("body = %q, want %q", got, "DELAYED: buy milk\n(set 3 hours ago)")
+		}
+	})
+}
+
+func TestSend_ActionButtons(t *testing.T) {
+	t.Run("no base_url configured: no Actions header", func(t *testing.T) {
+		srv, getReqs := recordingServer(t)
+		c := New(testConfig(srv.URL), testActionSecret)
+
+		r := reminder.Reminder{ID: "abc123", Text: "buy milk", OutboundTopics: []string{"topic-a"}, CreatedAt: time.Now()}
+		if err := c.Send(context.Background(), r, false); err != nil {
+			t.Fatalf("Send() error = %v", err)
+		}
+
+		if got := getReqs()[0].header.Get("Actions"); got != "" {
+			t.Errorf("Actions header = %q, want empty when base_url is unset", got)
+		}
+	})
+
+	t.Run("base_url configured: two action buttons attached with verifiable tokens", func(t *testing.T) {
+		srv, getReqs := recordingServer(t)
+		cfg := testConfig(srv.URL)
+		cfg.Server.BaseURL = "https://later.example.com"
+		c := New(cfg, testActionSecret)
+
+		r := reminder.Reminder{ID: "abc123", Text: "buy milk", OutboundTopics: []string{"topic-a"}, CreatedAt: time.Now()}
+		if err := c.Send(context.Background(), r, false); err != nil {
+			t.Fatalf("Send() error = %v", err)
+		}
+
+		actions := getReqs()[0].header.Get("Actions")
+		if actions == "" {
+			t.Fatal("Actions header is empty, want two action buttons")
+		}
+		if !strings.Contains(actions, "Snooze 1h") || !strings.Contains(actions, "Tomorrow") {
+			t.Errorf("Actions header = %q, want both button labels", actions)
+		}
+		if !strings.Contains(actions, "https://later.example.com/reminders/abc123/postpone?duration=in+1h") {
+			t.Errorf("Actions header = %q, want the Snooze 1h button's callback URL", actions)
+		}
+		if !strings.Contains(actions, "https://later.example.com/reminders/abc123/postpone?duration=tomorrow+morning") {
+			t.Errorf("Actions header = %q, want the Tomorrow button's callback URL", actions)
+		}
+		if got := strings.Count(actions, "method=POST"); got != 2 {
+			t.Errorf("Actions header has %d method=POST occurrences, want 2 (one per button): %q", got, actions)
+		}
+
+		tokenRe := regexp.MustCompile(`headers\.Authorization=Bearer (\S+?),`)
+		matches := tokenRe.FindAllStringSubmatch(actions, -1)
+		if len(matches) != 2 {
+			t.Fatalf("found %d bearer tokens in Actions header, want 2 (got: %q)", len(matches), actions)
+		}
+		if matches[0][1] != matches[1][1] {
+			t.Error("the two buttons carry different tokens, want one shared token (the postpone duration, not the token, is what differs between them)")
+		}
+
+		if _, err := actiontoken.Verify(testActionSecret, matches[0][1], "abc123", "postpone"); err != nil {
+			t.Errorf("minted token failed to verify: %v", err)
+		}
+	})
+
+	t.Run("bare IP:port base_url (no scheme) still produces a usable callback URL", func(t *testing.T) {
+		srv, getReqs := recordingServer(t)
+		cfg := testConfig(srv.URL)
+		cfg.Server.BaseURL = "192.168.1.53:8080"
+		c := New(cfg, testActionSecret)
+
+		r := reminder.Reminder{ID: "abc123", Text: "buy milk", OutboundTopics: []string{"topic-a"}, CreatedAt: time.Now()}
+		if err := c.Send(context.Background(), r, false); err != nil {
+			t.Fatalf("Send() error = %v", err)
+		}
+
+		actions := getReqs()[0].header.Get("Actions")
+		if !strings.Contains(actions, "http://192.168.1.53:8080/reminders/abc123/postpone") {
+			t.Errorf("Actions header = %q, want the callback URL normalized to include http://", actions)
 		}
 	})
 }
@@ -225,7 +304,7 @@ func TestSend_Tags(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			srv, getReqs := recordingServer(t)
-			c := New(testConfig(srv.URL))
+			c := New(testConfig(srv.URL), testActionSecret)
 
 			r := reminder.Reminder{Text: "buy cake", OutboundTopics: []string{"topic-a"}, Tags: tt.tags}
 			if err := c.Send(context.Background(), r, tt.late); err != nil {
@@ -262,7 +341,7 @@ func TestSend_Priority(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			srv, getReqs := recordingServer(t)
-			c := New(testConfig(srv.URL))
+			c := New(testConfig(srv.URL), testActionSecret)
 
 			r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}, Priority: tt.priority}
 			if err := c.Send(context.Background(), r, tt.late); err != nil {
@@ -294,7 +373,7 @@ func TestSend_Click(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			srv, getReqs := recordingServer(t)
-			c := New(testConfig(srv.URL))
+			c := New(testConfig(srv.URL), testActionSecret)
 
 			r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}, Click: tt.click}
 			if err := c.Send(context.Background(), r, false); err != nil {
@@ -315,7 +394,7 @@ func TestSend_Click(t *testing.T) {
 
 func TestSend_MultipleTopics(t *testing.T) {
 	srv, getReqs := recordingServer(t)
-	c := New(testConfig(srv.URL))
+	c := New(testConfig(srv.URL), testActionSecret)
 
 	r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a", "topic-b"}}
 	if err := c.Send(context.Background(), r, false); err != nil {
@@ -334,7 +413,7 @@ func TestSend_MultipleTopics(t *testing.T) {
 
 func TestSend_NoTopicsIsAnError(t *testing.T) {
 	srv, getReqs := recordingServer(t)
-	c := New(testConfig(srv.URL))
+	c := New(testConfig(srv.URL), testActionSecret)
 
 	r := reminder.Reminder{ID: "abc123", Text: "buy milk"}
 	err := c.Send(context.Background(), r, false)
@@ -358,7 +437,7 @@ func TestSend_ServerError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := New(testConfig(srv.URL))
+	c := New(testConfig(srv.URL), testActionSecret)
 	r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}}
 
 	err := c.Send(context.Background(), r, false)
@@ -381,7 +460,7 @@ func TestSend_ServerError(t *testing.T) {
 
 func TestSendConfirmation(t *testing.T) {
 	srv, getReqs := recordingServer(t)
-	c := New(testConfig(srv.URL))
+	c := New(testConfig(srv.URL), testActionSecret)
 
 	r := &reminder.Reminder{
 		ID:    "abc123",
@@ -420,7 +499,7 @@ func TestSendConfirmation(t *testing.T) {
 
 func TestSendError(t *testing.T) {
 	srv, getReqs := recordingServer(t)
-	c := New(testConfig(srv.URL))
+	c := New(testConfig(srv.URL), testActionSecret)
 
 	if err := c.sendError(context.Background(), "inbound-a", errors.New("no time information found")); err != nil {
 		t.Fatalf("sendError() error = %v", err)
@@ -468,7 +547,7 @@ func TestSubscribe(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := New(testConfig(srv.URL))
+	c := New(testConfig(srv.URL), testActionSecret)
 
 	msgs := make(chan subscriptionMessage, 16)
 	if _, err := c.subscribe(context.Background(), "inbound-a,inbound-b", "", msgs); err != nil {
@@ -513,7 +592,7 @@ func TestSubscribe_ServerError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := New(testConfig(srv.URL))
+	c := New(testConfig(srv.URL), testActionSecret)
 	msgs := make(chan subscriptionMessage, 1)
 
 	_, err := c.subscribe(context.Background(), "inbound-a", "", msgs)
@@ -558,7 +637,7 @@ func TestRun_CreatesAndConfirms(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := New(testConfig(srv.URL))
+	c := New(testConfig(srv.URL), testActionSecret)
 	c.reconnectWait = time.Millisecond
 
 	created := make(chan createCall, 4)
@@ -636,7 +715,7 @@ func TestRun_CreatesWithDirectives(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := New(testConfig(srv.URL))
+	c := New(testConfig(srv.URL), testActionSecret)
 	c.reconnectWait = time.Millisecond
 
 	created := make(chan createCall, 4)
@@ -705,7 +784,7 @@ func TestRun_ConflictingPriorityDirectivesSendsErrorFeedback(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := New(testConfig(srv.URL))
+	c := New(testConfig(srv.URL), testActionSecret)
 	c.reconnectWait = time.Millisecond
 
 	created := make(chan createCall, 4)
@@ -778,7 +857,7 @@ func TestRun_CreateFailureSendsErrorFeedback(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := New(testConfig(srv.URL))
+	c := New(testConfig(srv.URL), testActionSecret)
 	c.reconnectWait = time.Millisecond
 
 	created := make(chan createCall, 4)
@@ -839,7 +918,7 @@ func TestRun_ReconnectsAfterStreamDrops(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := New(testConfig(srv.URL))
+	c := New(testConfig(srv.URL), testActionSecret)
 	c.reconnectWait = time.Millisecond
 
 	created := make(chan createCall, 16)
@@ -908,7 +987,7 @@ func TestRun_ResubscribesWithSince(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := New(testConfig(srv.URL))
+	c := New(testConfig(srv.URL), testActionSecret)
 	c.reconnectWait = time.Millisecond
 
 	created := make(chan createCall, 64)
@@ -963,7 +1042,7 @@ func TestRun_NoInboundTopics(t *testing.T) {
 	srv, getReqs := recordingServer(t)
 	cfg := testConfig(srv.URL)
 	cfg.Inbound = nil
-	c := New(cfg)
+	c := New(cfg, testActionSecret)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
