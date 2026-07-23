@@ -19,7 +19,7 @@ type API struct {
 	cfg              *config.Config
 	svc              *service.Service
 	actionSecret     []byte
-	actionTokensUsed *actiontoken.UsedTracker
+	actionTokensUsed *actiontoken.UsedTokenTracker
 }
 
 func New(cfg *config.Config, svc *service.Service, actionSecret []byte) *API {
