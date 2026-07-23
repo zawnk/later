@@ -113,7 +113,7 @@ func Verify(secret []byte, tokenString, wantReminderID, wantAction string) (*Cla
 	return &claims, nil
 }
 
-// UsedTracker enforces single-use action tokens in memory: two of ntfy's
+// UsedTokenTracker enforces single-use action tokens in memory: two of ntfy's
 // own action buttons share one minted token (only the duration query
 // param differs), and a notification can be delivered to more than one
 // subscriber/device on the same topic, so clear=true alone can't prevent
@@ -122,13 +122,13 @@ func Verify(secret []byte, tokenString, wantReminderID, wantAction string) (*Cla
 // not persisted: a restart losing track of a few recently-used tokens
 // within their remaining window is an acceptable, low-stakes gap for a
 // homelab app, and not worth a datastore for.
-type UsedTracker struct {
+type UsedTokenTracker struct {
 	mu   sync.Mutex
 	used map[string]time.Time
 }
 
-func NewUsedTracker() *UsedTracker {
-	return &UsedTracker{used: make(map[string]time.Time)}
+func NewUsedTracker() *UsedTokenTracker {
+	return &UsedTokenTracker{used: make(map[string]time.Time)}
 }
 
 // MarkUsed records jti as used until expiresAt and reports whether this is
@@ -137,7 +137,7 @@ func NewUsedTracker() *UsedTracker {
 // opportunistically swept on every call instead, since the map only ever
 // holds tokens still within their (at most 72h) expiry, which stays small
 // at homelab scale.
-func (t *UsedTracker) MarkUsed(jti string, expiresAt time.Time) bool {
+func (t *UsedTokenTracker) MarkUsed(jti string, expiresAt time.Time) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
