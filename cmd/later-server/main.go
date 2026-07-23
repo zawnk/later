@@ -18,7 +18,6 @@ import (
 	"github.com/zawnk/later/internal/api"
 	"github.com/zawnk/later/internal/config"
 	"github.com/zawnk/later/internal/ntfy"
-	"github.com/zawnk/later/internal/reminder"
 	"github.com/zawnk/later/internal/scheduler"
 	"github.com/zawnk/later/internal/service"
 	"github.com/zawnk/later/internal/store"
@@ -62,7 +61,7 @@ func main() {
 	defer stop()
 
 	svc := service.New(s)
-	ntfyClient := ntfy.New(cfg, actionSecret)
+	ntfyClient := ntfy.New(cfg, actionSecret, svc)
 
 	var wg sync.WaitGroup
 
@@ -70,14 +69,7 @@ func main() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ntfyClient.Run(ctx, func(msg ntfy.ParsedInboundMessage) (*reminder.Reminder, error) {
-				return svc.CreateReminder(service.CreateInput{
-					Text:           msg.Text,
-					OutboundTopics: msg.Outbound,
-					Tags:           msg.Tags,
-					Priority:       msg.Priority,
-				})
-			})
+			ntfyClient.Run(ctx)
 		}()
 	}
 

@@ -118,6 +118,31 @@ func (c *client) create(req createRequest) (*reminder.Reminder, error) {
 	return &rem, nil
 }
 
+type parsePreview struct {
+	Text  string    `json:"text"`
+	DueAt time.Time `json:"due_at"`
+}
+
+func (c *client) parseTest(text string) (*parsePreview, error) {
+	payload, err := json.Marshal(struct {
+		Text string `json:"text"`
+	}{Text: text})
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.do(http.MethodPost, "/test/parse", bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var preview parsePreview
+	if err := json.NewDecoder(resp.Body).Decode(&preview); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &preview, nil
+}
+
 func (c *client) listPending(sortBy string) ([]reminder.Reminder, error) {
 	var reminders []reminder.Reminder
 	err := c.getJSON("/reminders?sort="+url.QueryEscape(sortBy), &reminders)
