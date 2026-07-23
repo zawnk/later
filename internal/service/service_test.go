@@ -365,6 +365,98 @@ func TestParseReminderText(t *testing.T) {
 	}
 }
 
+// FuzzPreprocessDuration hunts for panics in the pure regex-rewrite step -
+// seeded from TestPreprocessDuration's own table so the fuzzer starts from
+// every already-known interesting shape (flagged/unflagged units, combined
+// runs it must leave alone, embedded-in-word near-misses) rather than
+// from scratch. No correctness oracle for arbitrary input - the only
+// invariant checked is "doesn't panic," which is what fuzzing is actually
+// good for here; exact-output correctness is TestPreprocessDuration's job.
+func FuzzPreprocessDuration(f *testing.F) {
+	seeds := []string{
+		"in 3d", "within 3d", "in 4w test", "in 3mo time", "pok3 mon",
+		"in 10y is a decade", "in 60s make a minute", "no time included",
+		"3d", "3mo time", "in server1h down", "in 2h30m",
+		"in 1y2mo3w4d5h6m7s", "in 3d  call the plumber", "", "   ",
+		strings.Repeat("in 9d ", 500),
+	}
+	for _, s := range seeds {
+		f.Add(s)
+	}
+
+	f.Fuzz(func(t *testing.T, input string) {
+		preprocessDuration(input)
+	})
+}
+
+// FuzzParseReminderText hunts for panics and invariant violations in the
+// full task/due-time extraction pipeline - the actual user-facing surface
+// (CreateReminder, /test/parse, ntfy's inbound "/test", and the "/test"
+// trigger all funnel arbitrary text through this one method). No fixed
+// expected output for random input, so the invariants checked are the
+// ones that must hold for literally any input: never panics; any error
+// wraps ErrInvalidInput (anything else means something broke, not just
+// "bad input"); a non-error result always has non-empty task text and a
+// due time that isn't in the past relative to the fixed clock (the past-due
+// check failing to reject something would be a real, if narrow, bug).
+// Seeded from every adversarial case this session's stress-testing already
+// found real bugs from, plus a couple of new ones (empty/whitespace-only,
+// an absurdly large duration number, a huge repeated-token string) aimed
+// at classes those hand-written cases didn't specifically target.
+func FuzzParseReminderText(f *testing.F) {
+	seeds := []string{
+		"buy milk in 3 days",
+		"in 3d buy 5m of rope",
+		"remind me in 2h to check the 5h parking meter",
+		"in 3d buy 1y2mo of insurance",
+		"buy 2h of parking in 3d",
+		"reserve court 3 for 1h in 2d",
+		"call the plumber in 1w2d please",
+		"1w2d clean the gutters",
+		"clean the gutters 1w2d",
+		"call in 1d2h then in 3d4h again",
+		"within 3d call mom",
+		"buy milk tomorrow",
+		"buy milk yesterday",
+		"buy eggs",
+		"in 3 days",
+		"1w2d",
+		"",
+		"   ",
+		"marathon is on 10/10/2026",
+		"pick up the dry cleaning next tuesday at 2pm",
+		"in 99999999999999999999999999y call mom",
+		strings.Repeat("a", 5000),
+		strings.Repeat("in 1d ", 1000),
+	}
+	for _, s := range seeds {
+		f.Add(s)
+	}
+
+	fixedNow := time.Date(2026, 6, 15, 9, 0, 0, 0, time.Local)
+
+	f.Fuzz(func(t *testing.T, input string) {
+		svc := New(&mockStore{})
+		svc.now = func() time.Time { return fixedNow }
+
+		task, due, err := svc.ParseReminderText(input)
+
+		if err != nil {
+			if !errors.Is(err, ErrInvalidInput) {
+				t.Fatalf("ParseReminderText(%q) error = %v, want it to wrap ErrInvalidInput", input, err)
+			}
+			return
+		}
+
+		if task == "" {
+			t.Fatalf("ParseReminderText(%q) returned an empty task with no error", input)
+		}
+		if due.Before(fixedNow.Round(time.Minute)) {
+			t.Fatalf("ParseReminderText(%q) returned a past-due time %v with no error (now=%v)", input, due, fixedNow)
+		}
+	})
+}
+
 func TestCreateReminder_StoreError(t *testing.T) {
 	proxyErr := errors.New("disk full")
 	store := &mockStore{saveErr: proxyErr}
