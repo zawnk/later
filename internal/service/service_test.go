@@ -177,6 +177,42 @@ func TestParseDueTime_CombinedDurationDST(t *testing.T) {
 	}
 }
 
+// TestParseDueTime_TrimsSurroundingWhitespace guards a latent edge case in
+// the atStart/atEnd anchoring combinedDurationRegex.FindStringSubmatchIndex
+// relies on: without trimming first, a trailing space (or more than one
+// leading space) shifts loc[1]/loc[0] away from len(text)/0, so an
+// otherwise-anchored bare run like "1w2d" would be wrongly treated as
+// sandwiched mid-text and rejected. Not reachable today through
+// CreateReminder or resolvePostponeTime - both already trim their whole
+// input before calling parseDueTime - but parseDueTime trims defensively
+// too so this stays true for any future caller that doesn't.
+func TestParseDueTime_TrimsSurroundingWhitespace(t *testing.T) {
+	fixedNow := time.Date(2026, 6, 15, 9, 0, 0, 0, time.Local)
+	svc := New(&mockStore{})
+	svc.now = func() time.Time { return fixedNow }
+
+	tests := []struct {
+		name string
+		text string
+	}{
+		{"trailing whitespace after a bare run at the end", "clean the gutters 1w2d "},
+		{"multiple leading spaces before a bare run at the start", "  1w2d clean the gutters"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, due, err := svc.parseDueTime(tt.text)
+			if err != nil {
+				t.Fatalf("parseDueTime(%q) error = %v", tt.text, err)
+			}
+			want := fixedNow.AddDate(0, 0, 9)
+			if !due.Equal(want) {
+				t.Errorf("parseDueTime(%q) = %v, want %v", tt.text, due, want)
+			}
+		})
+	}
+}
+
 func TestCreateReminder(t *testing.T) {
 	fixedNow := time.Date(2026, 6, 15, 9, 0, 0, 0, time.Local)
 
@@ -680,6 +716,7 @@ func TestResolvePostponeTime(t *testing.T) {
 		{"pure garbage", "asdkfj", true, time.Time{}},
 		{"bare single unit", "1d", false, fixedNow.AddDate(0, 0, 1)},
 		{"single unit with in", "in 1d", false, fixedNow.AddDate(0, 0, 1)},
+		{"single unit with double in", "in in 1h", false, fixedNow.Add(time.Hour)},
 		{"bare combined units", "3h20m", false, fixedNow.Add(3*time.Hour + 20*time.Minute)},
 		{"combined units with in", "in 3h20m", false, fixedNow.Add(3*time.Hour + 20*time.Minute)},
 		{"combined units with within", "within 1d2h", false, fixedNow.AddDate(0, 0, 1).Add(2 * time.Hour)},

@@ -252,6 +252,9 @@ func TestSend_ActionButtons(t *testing.T) {
 		if !strings.Contains(actions, "https://later.example.com/reminders/abc123/postpone?duration=tomorrow+morning") {
 			t.Errorf("Actions header = %q, want the Tomorrow button's callback URL", actions)
 		}
+		if got := strings.Count(actions, "method=POST"); got != 2 {
+			t.Errorf("Actions header has %d method=POST occurrences, want 2 (one per button): %q", got, actions)
+		}
 
 		tokenRe := regexp.MustCompile(`headers\.Authorization=Bearer (\S+?),`)
 		matches := tokenRe.FindAllStringSubmatch(actions, -1)

@@ -19,7 +19,7 @@ const (
 	secretFileName = "action_secret"
 	secretFileMode = 0600
 	secretSize     = 32
-	expiry         = 7 * 24 * time.Hour
+	expiry         = 72 * time.Hour
 )
 
 type Claims struct {
@@ -55,7 +55,11 @@ func LoadOrCreateSecret(dataDir string) ([]byte, error) {
 	return secret, nil
 }
 
-// Mint signs a token scoped to reminderID/action, valid for 7 days.
+// Mint signs a token scoped to reminderID/action, valid for 72 hours.
+// Reminders only ever fire once (see internal/scheduler) with no retry, so
+// this has to stay long enough to cover a notification going unseen over a
+// weekend; shorter would silently kill the buttons with no way to retry
+// beyond falling back to the CLI/API.
 func Mint(secret []byte, reminderID, action string) (string, error) {
 	claims := Claims{
 		RegisteredClaims: jwt.RegisteredClaims{

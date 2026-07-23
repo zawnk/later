@@ -1,3 +1,23 @@
+// Package service implements reminder creation, postponing, and retrieval.
+//
+// Time parsing (parseDueTime) has three layers, tried in order:
+//
+//  1. combinedDurationRegex - 2+ chained compact units ("1w2d", "in
+//     2h30m"). Resolved locally via AddDate+Add so DST is preserved. Only
+//     trusted when isUnambiguousDurationRun says so - either explicitly
+//     flagged with "in "/"within ", or bare and anchoring the true start
+//     or end of the text.
+//  2. singleUnitRegex - a single "in|within N<unit>" ("in 3d"). Rewritten
+//     to English ("in 3 days") by preprocessDuration and handed to
+//     when.Parse, which has no native understanding of the abbreviated
+//     form and, unlike (1), never recognizes a bare single unit no matter
+//     how it's rewritten - so a single unit is never trusted unflagged.
+//  3. Everything else - "tomorrow", "next monday", calendar dates, times
+//     of day - goes straight to when.Parse.
+//
+// Postpone uses the same pipeline via resolvePostponeTime, which
+// additionally requires the match to consume the whole input (no task
+// text left over).
 package service
 
 import (
@@ -185,6 +205,8 @@ func (s *Service) CreateReminder(in CreateInput) (*reminder.Reminder, error) {
 //     ("tomorrow"), weekdays ("next monday"), calendar dates, specific
 //     times, and so on.
 func (s *Service) parseDueTime(text string) (textForTask, matchedText string, parsedTime time.Time, err error) {
+	text = strings.TrimSpace(text)
+
 	if loc := combinedDurationRegex.FindStringSubmatchIndex(text); loc != nil {
 		run := text[loc[4]:loc[5]]
 		if isUnambiguousDurationRun(run, loc[0] == 0, loc[1] == len(text)) {
@@ -239,7 +261,7 @@ func preprocessDuration(s string) string {
 // generateUniqueID retries reminder.GenerateID until it produces an ID
 // that doesn't collide with any pending or archived reminder. Collisions
 // are astronomically unlikely at this app's scale, but action-button
-// tokens now reference an archived ID for up to 7 days, and an
+// tokens now reference an archived ID for up to 72h, and an
 // archive-to-archive collision would silently resolve to the wrong
 // reminder's fields rather than fail loud.
 func (s *Service) generateUniqueID() (string, error) {
@@ -397,11 +419,7 @@ func (s *Service) Postpone(id string, timeExpr string) (*reminder.Reminder, erro
 // rotate the tires" or "garbage 1y2mo garbage"), which must be rejected
 // rather than silently accepted with the rest of the string discarded.
 func (s *Service) resolvePostponeTime(timeExpr string) (time.Time, error) {
-	trimmed := strings.TrimSpace(timeExpr)
-	prefixed := trimmed
-	if leadWord, _, _ := strings.Cut(trimmed, " "); leadWord != "in" && leadWord != "within" {
-		prefixed = "in " + trimmed
-	}
+	prefixed := ensureInPrefix(strings.TrimSpace(timeExpr))
 
 	textForTask, matchedText, due, err := s.parseDueTime(prefixed)
 	if err != nil {
@@ -417,4 +435,15 @@ func (s *Service) resolvePostponeTime(timeExpr string) (time.Time, error) {
 	}
 
 	return due, nil
+}
+
+// ensureInPrefix leads s with "in " unless it already starts with "in "/
+// "within " - so a bare unit like "1d" still reaches parseDueTime as "in
+// 1d" (required for when.Parse to recognize a single unit at all), without
+// doubling up on a caller-supplied "in tomorrow" into "in in tomorrow".
+func ensureInPrefix(s string) string {
+	if leadWord, _, _ := strings.Cut(s, " "); leadWord == "in" || leadWord == "within" {
+		return s
+	}
+	return "in " + s
 }

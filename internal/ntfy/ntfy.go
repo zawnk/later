@@ -141,14 +141,16 @@ func (c *Client) buildActions(reminderID string) (string, error) {
 	}
 
 	base := strings.TrimRight(config.NormalizedBaseURL(c.cfg.Server.BaseURL), "/") + "/reminders/" + reminderID + "/postpone"
-	snooze1h := base + "?duration=" + url.QueryEscape("in 1h")
-	tomorrow := base + "?duration=" + url.QueryEscape("tomorrow morning")
 
-	return fmt.Sprintf(
-		"http, Snooze 1h, %s, method=POST, headers.Authorization=Bearer %s, clear=true; "+
-			"http, Tomorrow, %s, method=POST, headers.Authorization=Bearer %s, clear=true",
-		snooze1h, token, tomorrow, token,
-	), nil
+	labels := []string{"Snooze 1h", "Tomorrow"}
+	durations := []string{"in 1h", "tomorrow morning"}
+	actions := make([]string, len(labels))
+	for i, label := range labels {
+		callback := base + "?duration=" + url.QueryEscape(durations[i])
+		actions[i] = fmt.Sprintf("http, %s, %s, method=POST, headers.Authorization=Bearer %s, clear=true", label, callback, token)
+	}
+
+	return strings.Join(actions, "; "), nil
 }
 
 func (c *Client) sendToTopic(ctx context.Context, text, topic string, mods ...ntfyMessageModifications) error {
