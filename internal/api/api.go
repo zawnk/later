@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/zawnk/later/internal/actiontoken"
 	"github.com/zawnk/later/internal/config"
@@ -36,6 +37,7 @@ func (a *API) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /reminders/{id}", a.auth(a.getReminder, ""))
 	mux.HandleFunc("DELETE /reminders/{id}", a.auth(a.cancelReminder, ""))
 	mux.HandleFunc("POST /reminders/{id}/postpone", a.auth(a.postponeReminder, "postpone"))
+	mux.HandleFunc("POST /test/parse", a.auth(a.testParse, ""))
 	mux.HandleFunc("GET /healthz", a.healthz)
 
 	return mux
@@ -284,6 +286,33 @@ func (a *API) postponeReminder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJsonResponse(w, http.StatusCreated, rem)
+}
+
+// testParse previews how text would be parsed by CreateReminder - task
+// text and resolved due time - without creating or storing anything.
+func (a *API) testParse(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Text string `json:"text"`
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		writeJSONError(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	task, due, err := a.svc.ParseReminderText(body.Text)
+	if err != nil {
+		writeServiceError(w, err, "failed to parse")
+		return
+	}
+
+	writeJsonResponse(w, http.StatusOK, struct {
+		Text  string    `json:"text"`
+		DueAt time.Time `json:"due_at"`
+	}{Text: task, DueAt: due})
 }
 
 func filterAllowed(requested, allowed []string) []string {

@@ -19,6 +19,7 @@ import (
 	"github.com/zawnk/later/internal/actiontoken"
 	"github.com/zawnk/later/internal/config"
 	"github.com/zawnk/later/internal/reminder"
+	"github.com/zawnk/later/internal/service"
 )
 
 // ageLineThreshold is the minimum time between a reminder's creation and
@@ -27,17 +28,17 @@ import (
 // information.
 const ageLineThreshold = time.Hour
 
+// ReminderService is what Client needs from internal/service to handle
+// inbound ntfy messages.
+type ReminderService interface {
+	CreateReminder(service.CreateInput) (*reminder.Reminder, error)
+	ParseReminderText(text string) (task string, due time.Time, err error)
+}
+
 type subscriptionMessage struct {
 	Text     string
 	Outbound []string
 	Inbound  string
-}
-
-type ParsedInboundMessage struct {
-	Text     string
-	Outbound []string
-	Tags     []string
-	Priority string
 }
 
 type ntfyMessage struct {
@@ -75,15 +76,17 @@ func priorityRank(p string) int {
 type Client struct {
 	cfg             *config.Config
 	actionSecret    []byte
+	svc             ReminderService
 	publishClient   *http.Client
 	subscribeClient *http.Client
 	reconnectWait   time.Duration
 }
 
-func New(cfg *config.Config, actionSecret []byte) *Client {
+func New(cfg *config.Config, actionSecret []byte, svc ReminderService) *Client {
 	return &Client{
 		cfg:          cfg,
 		actionSecret: actionSecret,
+		svc:          svc,
 		publishClient: &http.Client{
 			Timeout: 15 * time.Second,
 		},
@@ -218,7 +221,7 @@ func (c *Client) sendToTopic(ctx context.Context, text, topic string, mods ...nt
 	return nil
 }
 
-func (c *Client) Run(ctx context.Context, create func(ParsedInboundMessage) (*reminder.Reminder, error)) {
+func (c *Client) Run(ctx context.Context) {
 	if len(c.cfg.Inbound) == 0 {
 		slog.Info("no inbound topics configured, ntfy subscriber disabled")
 		<-ctx.Done()
@@ -232,7 +235,7 @@ func (c *Client) Run(ctx context.Context, create func(ParsedInboundMessage) (*re
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		c.consume(ctx, msgs, create)
+		c.consume(ctx, msgs)
 	}()
 
 	defer func() {
@@ -268,8 +271,13 @@ func (c *Client) Run(ctx context.Context, create func(ParsedInboundMessage) (*re
 	}
 }
 
-func (c *Client) consume(ctx context.Context, msgs <-chan subscriptionMessage, create func(ParsedInboundMessage) (*reminder.Reminder, error)) {
+func (c *Client) consume(ctx context.Context, msgs <-chan subscriptionMessage) {
 	for msg := range msgs {
+		if rest, ok := cutTestPrefix(msg.Text); ok {
+			c.handleTestParse(ctx, msg.Inbound, rest)
+			continue
+		}
+
 		text, tags, priority, err := parseDirectives(msg.Text)
 		if err != nil {
 			slog.Error("failed to parse inbound directives", "err", err)
@@ -279,7 +287,12 @@ func (c *Client) consume(ctx context.Context, msgs <-chan subscriptionMessage, c
 			continue
 		}
 
-		rem, err := create(ParsedInboundMessage{Text: text, Outbound: msg.Outbound, Tags: tags, Priority: priority})
+		rem, err := c.svc.CreateReminder(service.CreateInput{
+			Text:           text,
+			OutboundTopics: msg.Outbound,
+			Tags:           tags,
+			Priority:       priority,
+		})
 		if err != nil {
 			slog.Error("failed to create reminder from ntfy", "err", err)
 			if sendErr := c.sendError(ctx, msg.Inbound, err); sendErr != nil {
@@ -292,6 +305,48 @@ func (c *Client) consume(ctx context.Context, msgs <-chan subscriptionMessage, c
 		if err := c.sendConfirmation(ctx, msg.Inbound, rem); err != nil {
 			slog.Error("failed to send confirmation", "err", err)
 		}
+	}
+}
+
+// cutTestPrefix reports whether text is the "/test" diagnostic trigger
+// (case-insensitive, e.g. from a phone keyboard's autocapitalize) and
+// returns whatever follows it, trimmed. Matches a bare "/test" (rest "")
+// and "/test <anything>" alike.
+func cutTestPrefix(text string) (rest string, ok bool) {
+	trimmed := strings.TrimSpace(text)
+	lower := strings.ToLower(trimmed)
+	if lower != "/test" && !strings.HasPrefix(lower, "/test ") {
+		return "", false
+	}
+	return strings.TrimSpace(trimmed[len("/test"):]), true
+}
+
+// handleTestParse previews rest the same way a real create would - through
+// parseDirectives first, so a "/test buy milk tomorrow #work" preview
+// never shows a tag stuck in the task text a real send would have
+// stripped - then replies with task+due only (stripped tags/priority
+// aren't echoed back; this is a preview of the *time* parsing).
+func (c *Client) handleTestParse(ctx context.Context, inbound, rest string) {
+	text, _, _, err := parseDirectives(rest)
+	if err != nil {
+		slog.Error("failed to parse inbound directives for /test", "err", err)
+		if sendErr := c.sendError(ctx, inbound, err); sendErr != nil {
+			slog.Error("failed to send error feedback", "err", sendErr)
+		}
+		return
+	}
+
+	task, due, err := c.svc.ParseReminderText(text)
+	if err != nil {
+		slog.Error("failed to preview parse from ntfy", "err", err)
+		if sendErr := c.sendError(ctx, inbound, err); sendErr != nil {
+			slog.Error("failed to send error feedback", "err", sendErr)
+		}
+		return
+	}
+
+	if err := c.sendParsePreview(ctx, inbound, task, due); err != nil {
+		slog.Error("failed to send parse preview", "err", err)
 	}
 }
 
@@ -376,6 +431,11 @@ func (c *Client) resolveOutbound(topic string) []string {
 
 func (c *Client) sendConfirmation(ctx context.Context, topic string, r *reminder.Reminder) error {
 	msg := fmt.Sprintf("Reminder set for %s ✅ (%s)", r.DueAt.Format("Mon Jan 2, 15:04"), r.ID)
+	return c.sendSystem(ctx, msg, topic)
+}
+
+func (c *Client) sendParsePreview(ctx context.Context, topic, task string, due time.Time) error {
+	msg := fmt.Sprintf("%q -> %s", task, due.Format("Mon Jan 2, 15:04"))
 	return c.sendSystem(ctx, msg, topic)
 }
 

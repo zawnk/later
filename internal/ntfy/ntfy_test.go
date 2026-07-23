@@ -16,9 +16,59 @@ import (
 	"github.com/zawnk/later/internal/actiontoken"
 	"github.com/zawnk/later/internal/config"
 	"github.com/zawnk/later/internal/reminder"
+	"github.com/zawnk/later/internal/service"
 )
 
 var testActionSecret = []byte("test-action-secret")
+
+type stubReminderService struct {
+	createFn  func(service.CreateInput) (*reminder.Reminder, error)
+	previewFn func(string) (string, time.Time, error)
+}
+
+func (s *stubReminderService) CreateReminder(in service.CreateInput) (*reminder.Reminder, error) {
+	if s.createFn == nil {
+		return nil, errors.New("CreateReminder not expected in this test")
+	}
+	return s.createFn(in)
+}
+
+func (s *stubReminderService) ParseReminderText(text string) (string, time.Time, error) {
+	if s.previewFn == nil {
+		return "", time.Time{}, errors.New("ParseReminderText not expected in this test")
+	}
+	return s.previewFn(text)
+}
+
+func TestCutTestPrefix(t *testing.T) {
+	tests := []struct {
+		name     string
+		text     string
+		wantRest string
+		wantOK   bool
+	}{
+		{"bare /test with nothing after", "/test", "", true},
+		{"bare /test with surrounding whitespace", "  /test  ", "", true},
+		{"/test with text after", "/test buy milk tomorrow", "buy milk tomorrow", true},
+		{"case-insensitive, matching phone autocapitalize", "/Test tomorrow", "tomorrow", true},
+		{"/TEST all caps", "/TEST tomorrow", "tomorrow", true},
+		{"not a trigger at all", "buy milk tomorrow", "", false},
+		{"a word merely containing test is not a match", "/testing tomorrow", "", false},
+		{"empty string", "", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rest, ok := cutTestPrefix(tt.text)
+			if ok != tt.wantOK {
+				t.Fatalf("cutTestPrefix(%q) ok = %v, want %v", tt.text, ok, tt.wantOK)
+			}
+			if rest != tt.wantRest {
+				t.Errorf("cutTestPrefix(%q) rest = %q, want %q", tt.text, rest, tt.wantRest)
+			}
+		})
+	}
+}
 
 type recordedRequest struct {
 	method string
@@ -77,7 +127,7 @@ type createCall struct {
 }
 
 func TestResolveOutbound(t *testing.T) {
-	c := New(testConfig("http://irrelevant"), testActionSecret)
+	c := New(testConfig("http://irrelevant"), testActionSecret, &stubReminderService{})
 
 	tests := []struct {
 		name  string
@@ -102,7 +152,7 @@ func TestResolveOutbound(t *testing.T) {
 func TestSend(t *testing.T) {
 	srv, getReqs := recordingServer(t)
 	cfg := testConfig(srv.URL)
-	c := New(cfg, testActionSecret)
+	c := New(cfg, testActionSecret, &stubReminderService{})
 
 	r := reminder.Reminder{
 		ID:             "abc123",
@@ -148,7 +198,7 @@ func TestSend(t *testing.T) {
 
 func TestSend_Late(t *testing.T) {
 	srv, getReqs := recordingServer(t)
-	c := New(testConfig(srv.URL), testActionSecret)
+	c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
 
 	r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}, CreatedAt: time.Now()}
 	if err := c.Send(context.Background(), r, true); err != nil {
@@ -172,7 +222,7 @@ func TestSend_Late(t *testing.T) {
 func TestSend_AgeLine(t *testing.T) {
 	t.Run("below the threshold: no age line", func(t *testing.T) {
 		srv, getReqs := recordingServer(t)
-		c := New(testConfig(srv.URL), testActionSecret)
+		c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
 
 		r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}, CreatedAt: time.Now().Add(-30 * time.Minute)}
 		if err := c.Send(context.Background(), r, false); err != nil {
@@ -186,7 +236,7 @@ func TestSend_AgeLine(t *testing.T) {
 
 	t.Run("above the threshold: age line appended as a second line", func(t *testing.T) {
 		srv, getReqs := recordingServer(t)
-		c := New(testConfig(srv.URL), testActionSecret)
+		c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
 
 		r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}, CreatedAt: time.Now().Add(-3 * time.Hour)}
 		if err := c.Send(context.Background(), r, false); err != nil {
@@ -200,7 +250,7 @@ func TestSend_AgeLine(t *testing.T) {
 
 	t.Run("late prefix wraps the whole thing, age line stays at the end", func(t *testing.T) {
 		srv, getReqs := recordingServer(t)
-		c := New(testConfig(srv.URL), testActionSecret)
+		c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
 
 		r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}, CreatedAt: time.Now().Add(-3 * time.Hour)}
 		if err := c.Send(context.Background(), r, true); err != nil {
@@ -216,7 +266,7 @@ func TestSend_AgeLine(t *testing.T) {
 func TestSend_ActionButtons(t *testing.T) {
 	t.Run("no base_url configured: no Actions header", func(t *testing.T) {
 		srv, getReqs := recordingServer(t)
-		c := New(testConfig(srv.URL), testActionSecret)
+		c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
 
 		r := reminder.Reminder{ID: "abc123", Text: "buy milk", OutboundTopics: []string{"topic-a"}, CreatedAt: time.Now()}
 		if err := c.Send(context.Background(), r, false); err != nil {
@@ -232,7 +282,7 @@ func TestSend_ActionButtons(t *testing.T) {
 		srv, getReqs := recordingServer(t)
 		cfg := testConfig(srv.URL)
 		cfg.Server.BaseURL = "https://later.example.com"
-		c := New(cfg, testActionSecret)
+		c := New(cfg, testActionSecret, &stubReminderService{})
 
 		r := reminder.Reminder{ID: "abc123", Text: "buy milk", OutboundTopics: []string{"topic-a"}, CreatedAt: time.Now()}
 		if err := c.Send(context.Background(), r, false); err != nil {
@@ -274,7 +324,7 @@ func TestSend_ActionButtons(t *testing.T) {
 		srv, getReqs := recordingServer(t)
 		cfg := testConfig(srv.URL)
 		cfg.Server.BaseURL = "192.168.1.53:8080"
-		c := New(cfg, testActionSecret)
+		c := New(cfg, testActionSecret, &stubReminderService{})
 
 		r := reminder.Reminder{ID: "abc123", Text: "buy milk", OutboundTopics: []string{"topic-a"}, CreatedAt: time.Now()}
 		if err := c.Send(context.Background(), r, false); err != nil {
@@ -304,7 +354,7 @@ func TestSend_Tags(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			srv, getReqs := recordingServer(t)
-			c := New(testConfig(srv.URL), testActionSecret)
+			c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
 
 			r := reminder.Reminder{Text: "buy cake", OutboundTopics: []string{"topic-a"}, Tags: tt.tags}
 			if err := c.Send(context.Background(), r, tt.late); err != nil {
@@ -341,7 +391,7 @@ func TestSend_Priority(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			srv, getReqs := recordingServer(t)
-			c := New(testConfig(srv.URL), testActionSecret)
+			c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
 
 			r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}, Priority: tt.priority}
 			if err := c.Send(context.Background(), r, tt.late); err != nil {
@@ -373,7 +423,7 @@ func TestSend_Click(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			srv, getReqs := recordingServer(t)
-			c := New(testConfig(srv.URL), testActionSecret)
+			c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
 
 			r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}, Click: tt.click}
 			if err := c.Send(context.Background(), r, false); err != nil {
@@ -394,7 +444,7 @@ func TestSend_Click(t *testing.T) {
 
 func TestSend_MultipleTopics(t *testing.T) {
 	srv, getReqs := recordingServer(t)
-	c := New(testConfig(srv.URL), testActionSecret)
+	c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
 
 	r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a", "topic-b"}}
 	if err := c.Send(context.Background(), r, false); err != nil {
@@ -413,7 +463,7 @@ func TestSend_MultipleTopics(t *testing.T) {
 
 func TestSend_NoTopicsIsAnError(t *testing.T) {
 	srv, getReqs := recordingServer(t)
-	c := New(testConfig(srv.URL), testActionSecret)
+	c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
 
 	r := reminder.Reminder{ID: "abc123", Text: "buy milk"}
 	err := c.Send(context.Background(), r, false)
@@ -437,7 +487,7 @@ func TestSend_ServerError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := New(testConfig(srv.URL), testActionSecret)
+	c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
 	r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}}
 
 	err := c.Send(context.Background(), r, false)
@@ -460,7 +510,7 @@ func TestSend_ServerError(t *testing.T) {
 
 func TestSendConfirmation(t *testing.T) {
 	srv, getReqs := recordingServer(t)
-	c := New(testConfig(srv.URL), testActionSecret)
+	c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
 
 	r := &reminder.Reminder{
 		ID:    "abc123",
@@ -499,7 +549,7 @@ func TestSendConfirmation(t *testing.T) {
 
 func TestSendError(t *testing.T) {
 	srv, getReqs := recordingServer(t)
-	c := New(testConfig(srv.URL), testActionSecret)
+	c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
 
 	if err := c.sendError(context.Background(), "inbound-a", errors.New("no time information found")); err != nil {
 		t.Fatalf("sendError() error = %v", err)
@@ -547,7 +597,7 @@ func TestSubscribe(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := New(testConfig(srv.URL), testActionSecret)
+	c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
 
 	msgs := make(chan subscriptionMessage, 16)
 	if _, err := c.subscribe(context.Background(), "inbound-a,inbound-b", "", msgs); err != nil {
@@ -592,7 +642,7 @@ func TestSubscribe_ServerError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := New(testConfig(srv.URL), testActionSecret)
+	c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
 	msgs := make(chan subscriptionMessage, 1)
 
 	_, err := c.subscribe(context.Background(), "inbound-a", "", msgs)
@@ -637,14 +687,14 @@ func TestRun_CreatesAndConfirms(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := New(testConfig(srv.URL), testActionSecret)
-	c.reconnectWait = time.Millisecond
-
 	created := make(chan createCall, 4)
-	create := func(msg ParsedInboundMessage) (*reminder.Reminder, error) {
-		created <- createCall{text: msg.Text, outbound: msg.Outbound, tags: msg.Tags, priority: msg.Priority}
+	create := func(in service.CreateInput) (*reminder.Reminder, error) {
+		created <- createCall{text: in.Text, outbound: in.OutboundTopics, tags: in.Tags, priority: in.Priority}
 		return &reminder.Reminder{ID: "rem-1", DueAt: time.Date(2026, 6, 15, 9, 0, 0, 0, time.UTC)}, nil
 	}
+
+	c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{createFn: create})
+	c.reconnectWait = time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -652,7 +702,7 @@ func TestRun_CreatesAndConfirms(t *testing.T) {
 	runDone := make(chan struct{})
 	go func() {
 		defer close(runDone)
-		c.Run(ctx, create)
+		c.Run(ctx)
 	}()
 
 	select {
@@ -690,6 +740,148 @@ func TestRun_CreatesAndConfirms(t *testing.T) {
 	}
 }
 
+func TestRun_TestParseRepliesWithPreview(t *testing.T) {
+	var (
+		mu        sync.Mutex
+		delivered bool
+	)
+	replied := make(chan recordedRequest, 4)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			body, _ := io.ReadAll(r.Body)
+			replied <- recordedRequest{method: r.Method, path: r.URL.Path, header: r.Header.Clone(), body: string(body)}
+			return
+		}
+
+		mu.Lock()
+		first := !delivered
+		delivered = true
+		mu.Unlock()
+		if first {
+			_, _ = io.WriteString(w, `{"event":"message","topic":"inbound-a","message":"/test buy milk tomorrow #work"}`+"\n")
+		}
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+
+	create := func(in service.CreateInput) (*reminder.Reminder, error) {
+		t.Error("create was called, want the /test trigger to bypass reminder creation entirely")
+		return nil, errors.New("unexpected create call")
+	}
+	preview := func(text string) (string, time.Time, error) {
+		if text != "buy milk tomorrow" {
+			t.Errorf("preview received %q, want the #work directive already stripped (\"buy milk tomorrow\")", text)
+		}
+		return "buy milk", time.Date(2026, 6, 16, 9, 0, 0, 0, time.UTC), nil
+	}
+
+	c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{createFn: create, previewFn: preview})
+	c.reconnectWait = time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		c.Run(ctx)
+	}()
+
+	select {
+	case reply := <-replied:
+		if reply.path != "/inbound-a" {
+			t.Errorf("reply path = %q, want /inbound-a (the message's own topic)", reply.path)
+		}
+		if !strings.HasPrefix(reply.body, "[later] ") {
+			t.Errorf("reply body = %q, want the %q prefix", reply.body, "[later] ")
+		}
+		if !strings.Contains(reply.body, "buy milk") {
+			t.Errorf("reply body = %q, want it to contain the previewed task text", reply.body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the preview reply")
+	}
+
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
+func TestRun_TestParseFailureSendsErrorFeedback(t *testing.T) {
+	var (
+		mu        sync.Mutex
+		delivered bool
+	)
+	errored := make(chan recordedRequest, 4)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			body, _ := io.ReadAll(r.Body)
+			errored <- recordedRequest{method: r.Method, path: r.URL.Path, header: r.Header.Clone(), body: string(body)}
+			return
+		}
+
+		mu.Lock()
+		first := !delivered
+		delivered = true
+		mu.Unlock()
+		if first {
+			_, _ = io.WriteString(w, `{"event":"message","topic":"inbound-a","message":"/test gibberish"}`+"\n")
+		}
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+
+	create := func(in service.CreateInput) (*reminder.Reminder, error) {
+		t.Error("create was called, want the /test trigger to bypass reminder creation entirely")
+		return nil, errors.New("unexpected create call")
+	}
+	preview := func(text string) (string, time.Time, error) {
+		return "", time.Time{}, errors.New("no time information found")
+	}
+
+	c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{createFn: create, previewFn: preview})
+	c.reconnectWait = time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		c.Run(ctx)
+	}()
+
+	select {
+	case reply := <-errored:
+		if !strings.HasPrefix(reply.body, "[later] error:") {
+			t.Errorf("reply body = %q, want the %q prefix", reply.body, "[later] error:")
+		}
+		if !strings.Contains(reply.body, "no time information found") {
+			t.Errorf("reply body = %q, want it to contain the real parse failure reason", reply.body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the error reply")
+	}
+
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
 func TestRun_CreatesWithDirectives(t *testing.T) {
 	var (
 		mu        sync.Mutex
@@ -715,14 +907,13 @@ func TestRun_CreatesWithDirectives(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := New(testConfig(srv.URL), testActionSecret)
-	c.reconnectWait = time.Millisecond
-
 	created := make(chan createCall, 4)
-	create := func(msg ParsedInboundMessage) (*reminder.Reminder, error) {
-		created <- createCall{text: msg.Text, outbound: msg.Outbound, tags: msg.Tags, priority: msg.Priority}
+	create := func(in service.CreateInput) (*reminder.Reminder, error) {
+		created <- createCall{text: in.Text, outbound: in.OutboundTopics, tags: in.Tags, priority: in.Priority}
 		return &reminder.Reminder{ID: "rem-1"}, nil
 	}
+	c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{createFn: create})
+	c.reconnectWait = time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -730,7 +921,7 @@ func TestRun_CreatesWithDirectives(t *testing.T) {
 	runDone := make(chan struct{})
 	go func() {
 		defer close(runDone)
-		c.Run(ctx, create)
+		c.Run(ctx)
 	}()
 
 	select {
@@ -784,14 +975,13 @@ func TestRun_ConflictingPriorityDirectivesSendsErrorFeedback(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := New(testConfig(srv.URL), testActionSecret)
-	c.reconnectWait = time.Millisecond
-
 	created := make(chan createCall, 4)
-	create := func(msg ParsedInboundMessage) (*reminder.Reminder, error) {
-		created <- createCall{text: msg.Text, outbound: msg.Outbound, tags: msg.Tags, priority: msg.Priority}
+	create := func(in service.CreateInput) (*reminder.Reminder, error) {
+		created <- createCall{text: in.Text, outbound: in.OutboundTopics, tags: in.Tags, priority: in.Priority}
 		return &reminder.Reminder{ID: "rem-1"}, nil
 	}
+	c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{createFn: create})
+	c.reconnectWait = time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -799,7 +989,7 @@ func TestRun_ConflictingPriorityDirectivesSendsErrorFeedback(t *testing.T) {
 	runDone := make(chan struct{})
 	go func() {
 		defer close(runDone)
-		c.Run(ctx, create)
+		c.Run(ctx)
 	}()
 
 	select {
@@ -857,14 +1047,13 @@ func TestRun_CreateFailureSendsErrorFeedback(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := New(testConfig(srv.URL), testActionSecret)
-	c.reconnectWait = time.Millisecond
-
 	created := make(chan createCall, 4)
-	create := func(msg ParsedInboundMessage) (*reminder.Reminder, error) {
-		created <- createCall{text: msg.Text, outbound: msg.Outbound, tags: msg.Tags, priority: msg.Priority}
+	create := func(in service.CreateInput) (*reminder.Reminder, error) {
+		created <- createCall{text: in.Text, outbound: in.OutboundTopics, tags: in.Tags, priority: in.Priority}
 		return nil, errors.New("no time information found")
 	}
+	c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{createFn: create})
+	c.reconnectWait = time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -872,7 +1061,7 @@ func TestRun_CreateFailureSendsErrorFeedback(t *testing.T) {
 	runDone := make(chan struct{})
 	go func() {
 		defer close(runDone)
-		c.Run(ctx, create)
+		c.Run(ctx)
 	}()
 
 	select {
@@ -918,14 +1107,13 @@ func TestRun_ReconnectsAfterStreamDrops(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := New(testConfig(srv.URL), testActionSecret)
-	c.reconnectWait = time.Millisecond
-
 	created := make(chan createCall, 16)
-	create := func(msg ParsedInboundMessage) (*reminder.Reminder, error) {
-		created <- createCall{text: msg.Text, outbound: msg.Outbound, tags: msg.Tags, priority: msg.Priority}
+	create := func(in service.CreateInput) (*reminder.Reminder, error) {
+		created <- createCall{text: in.Text, outbound: in.OutboundTopics, tags: in.Tags, priority: in.Priority}
 		return &reminder.Reminder{ID: "rem-1"}, nil
 	}
+	c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{createFn: create})
+	c.reconnectWait = time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -933,7 +1121,7 @@ func TestRun_ReconnectsAfterStreamDrops(t *testing.T) {
 	runDone := make(chan struct{})
 	go func() {
 		defer close(runDone)
-		c.Run(ctx, create)
+		c.Run(ctx)
 	}()
 
 	for i := range 2 {
@@ -987,14 +1175,13 @@ func TestRun_ResubscribesWithSince(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := New(testConfig(srv.URL), testActionSecret)
-	c.reconnectWait = time.Millisecond
-
 	created := make(chan createCall, 64)
-	create := func(msg ParsedInboundMessage) (*reminder.Reminder, error) {
-		created <- createCall{text: msg.Text, outbound: msg.Outbound, tags: msg.Tags, priority: msg.Priority}
+	create := func(in service.CreateInput) (*reminder.Reminder, error) {
+		created <- createCall{text: in.Text, outbound: in.OutboundTopics, tags: in.Tags, priority: in.Priority}
 		return &reminder.Reminder{ID: "rem-1"}, nil
 	}
+	c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{createFn: create})
+	c.reconnectWait = time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1002,7 +1189,7 @@ func TestRun_ResubscribesWithSince(t *testing.T) {
 	runDone := make(chan struct{})
 	go func() {
 		defer close(runDone)
-		c.Run(ctx, create)
+		c.Run(ctx)
 	}()
 
 	var texts []string
@@ -1042,21 +1229,21 @@ func TestRun_NoInboundTopics(t *testing.T) {
 	srv, getReqs := recordingServer(t)
 	cfg := testConfig(srv.URL)
 	cfg.Inbound = nil
-	c := New(cfg, testActionSecret)
+
+	created := make(chan createCall, 1)
+	create := func(in service.CreateInput) (*reminder.Reminder, error) {
+		created <- createCall{text: in.Text, outbound: in.OutboundTopics, tags: in.Tags, priority: in.Priority}
+		return nil, nil
+	}
+	c := New(cfg, testActionSecret, &stubReminderService{createFn: create})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	created := make(chan createCall, 1)
-	create := func(msg ParsedInboundMessage) (*reminder.Reminder, error) {
-		created <- createCall{text: msg.Text, outbound: msg.Outbound, tags: msg.Tags, priority: msg.Priority}
-		return nil, nil
-	}
-
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		c.Run(ctx, create)
+		c.Run(ctx)
 	}()
 
 	select {
