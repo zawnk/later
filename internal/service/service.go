@@ -131,35 +131,51 @@ func New(s Store) *Service {
 	}
 }
 
-func (s *Service) CreateReminder(in CreateInput) (*reminder.Reminder, error) {
-	text := strings.TrimSpace(in.Text)
+// ParseReminderText runs text through the exact same task/due-time extraction
+// CreateReminder uses, without generating an ID or saving anything -
+// backs the /test/parse "show what would be scheduled" preview (CLI, API,
+// and the ntfy inbound "/test <text>" trigger). Returns the same
+// ErrInvalidInput-wrapped errors CreateReminder would, since it's the same
+// code, so a preview failure is always the real reason a real create would
+// also fail.
+func (s *Service) ParseReminderText(text string) (task string, due time.Time, err error) {
+	text = strings.TrimSpace(text)
 	if text == "" {
-		return nil, fmt.Errorf("%w: empty reminder text", ErrInvalidInput)
-	}
-
-	if err := validateNotificationOptions(in); err != nil {
-		return nil, err
+		return "", time.Time{}, fmt.Errorf("%w: empty reminder text", ErrInvalidInput)
 	}
 
 	if utf8.RuneCountInString(text) > maxReminderTextLength {
-		return nil, fmt.Errorf("%w: reminder text too long (max %d chars)", ErrInvalidInput, maxReminderTextLength)
+		return "", time.Time{}, fmt.Errorf("%w: reminder text too long (max %d chars)", ErrInvalidInput, maxReminderTextLength)
 	}
 
 	textForTask, matchedText, parsedTime, err := s.parseDueTime(text)
 	if err != nil {
-		return nil, err
+		return "", time.Time{}, err
 	}
 
-	task := collapseWhitespace(strings.Replace(textForTask, matchedText, "", 1))
+	task = collapseWhitespace(strings.Replace(textForTask, matchedText, "", 1))
 	task = strings.TrimSuffix(task, " at")
 	task = strings.TrimPrefix(task, "at ")
 	if task == "" {
-		return nil, fmt.Errorf("%w: no task text found", ErrInvalidInput)
+		return "", time.Time{}, fmt.Errorf("%w: no task text found", ErrInvalidInput)
 	}
 
 	dueAt := parsedTime.Local().Round(time.Minute)
 	if dueAt.Before(s.now().Round(time.Minute)) {
-		return nil, fmt.Errorf("%w: due time %s is in the past", ErrInvalidInput, dueAt.Format(time.RFC3339))
+		return "", time.Time{}, fmt.Errorf("%w: due time %s is in the past", ErrInvalidInput, dueAt.Format(time.RFC3339))
+	}
+
+	return task, dueAt, nil
+}
+
+func (s *Service) CreateReminder(in CreateInput) (*reminder.Reminder, error) {
+	task, dueAt, err := s.ParseReminderText(in.Text)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := validateNotificationOptions(in); err != nil {
+		return nil, err
 	}
 
 	id, err := s.generateUniqueID()

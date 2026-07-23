@@ -1,7 +1,9 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -552,6 +554,88 @@ func TestPostponeReminder(t *testing.T) {
 
 		req := httptest.NewRequest(http.MethodPost, "/reminders/abc123/postpone", nil)
 		req.Header.Set("Authorization", "Bearer "+token)
+		rr := httptest.NewRecorder()
+		a.Routes().ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusUnauthorized {
+			t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+		}
+	})
+}
+
+func TestTestParse(t *testing.T) {
+	cfg := &config.Config{
+		AuthTokens: []config.Token{{Token: "valid-token", Outbound: []string{"topic-a"}}},
+	}
+
+	postBody := func(text string) io.Reader {
+		b, _ := json.Marshal(struct {
+			Text string `json:"text"`
+		}{Text: text})
+		return bytes.NewReader(b)
+	}
+
+	t.Run("valid text previews task and due time without persisting anything", func(t *testing.T) {
+		store := &stubStore{}
+		a := New(cfg, service.New(store), testActionSecret)
+
+		req := httptest.NewRequest(http.MethodPost, "/test/parse", postBody("buy milk in 3 days"))
+		req.Header.Set("Authorization", "Bearer valid-token")
+		rr := httptest.NewRecorder()
+		a.Routes().ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d (body: %s)", rr.Code, http.StatusOK, rr.Body.String())
+		}
+
+		var got struct {
+			Text  string    `json:"text"`
+			DueAt time.Time `json:"due_at"`
+		}
+		if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+			t.Fatalf("decoding response: %v", err)
+		}
+		if got.Text != "buy milk" {
+			t.Errorf("Text = %q, want %q", got.Text, "buy milk")
+		}
+		if len(store.saved) != 0 || len(store.archive) != 0 {
+			t.Errorf("store has saved=%d archive=%d, want both 0 (preview must not persist)", len(store.saved), len(store.archive))
+		}
+	})
+
+	t.Run("unparseable text is a 400 with the real reason", func(t *testing.T) {
+		a := New(cfg, service.New(&stubStore{}), testActionSecret)
+
+		req := httptest.NewRequest(http.MethodPost, "/test/parse", postBody("buy eggs"))
+		req.Header.Set("Authorization", "Bearer valid-token")
+		rr := httptest.NewRecorder()
+		a.Routes().ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d (body: %s)", rr.Code, http.StatusBadRequest, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), "no time information found") {
+			t.Errorf("body = %q, want it to contain the real parse failure reason", rr.Body.String())
+		}
+	})
+
+	t.Run("unknown field in request body is a 400", func(t *testing.T) {
+		a := New(cfg, service.New(&stubStore{}), testActionSecret)
+
+		req := httptest.NewRequest(http.MethodPost, "/test/parse", strings.NewReader(`{"text":"buy milk in 3 days","topic":"oops"}`))
+		req.Header.Set("Authorization", "Bearer valid-token")
+		rr := httptest.NewRecorder()
+		a.Routes().ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("no auth is a 401", func(t *testing.T) {
+		a := New(cfg, service.New(&stubStore{}), testActionSecret)
+
+		req := httptest.NewRequest(http.MethodPost, "/test/parse", postBody("buy milk in 3 days"))
 		rr := httptest.NewRecorder()
 		a.Routes().ServeHTTP(rr, req)
 

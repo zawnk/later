@@ -30,6 +30,7 @@ type CLI struct {
 	Last        LastCmd        `cmd:"" help:"Show the most recently fired reminder."`
 	Cancel      CancelCmd      `cmd:"" help:"Cancel a pending reminder."`
 	Postpone    PostponeCmd    `cmd:"" help:"Re-schedule a fired reminder."`
+	Test        TestCmd        `cmd:"" help:"Diagnostic commands that don't create or change anything."`
 	Healthcheck HealthcheckCmd `cmd:"" help:"Probe the server's /healthz; exit 0 if healthy. Needs no token -- usable as a Docker HEALTHCHECK."`
 }
 
@@ -123,6 +124,32 @@ func (c *CreateCmd) Run(a *app) error {
 		return a.printJSON(rem)
 	}
 	fmt.Fprintf(a.out, "set for %s: %s (%s)\n", formatTime(rem.DueAt), rem.Text, rem.ID)
+	return nil
+}
+
+type TestCmd struct {
+	Parse ParseCmd `cmd:"" help:"Preview how free text would be parsed - task text and resolved due time - without creating a reminder."`
+}
+
+type ParseCmd struct {
+	Text []string `arg:"" help:"Text to preview, e.g.: later test parse tomorrow at 2am go to bed"`
+}
+
+func (p *ParseCmd) Run(a *app) error {
+	cl, err := a.client()
+	if err != nil {
+		return err
+	}
+
+	text := strings.Join(p.Text, " ")
+	preview, err := cl.parseTest(text)
+	if err != nil {
+		return err
+	}
+	if a.json {
+		return a.printJSON(preview)
+	}
+	fmt.Fprintf(a.out, "%q -> %s\n", preview.Text, formatTime(preview.DueAt))
 	return nil
 }
 

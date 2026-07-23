@@ -306,6 +306,65 @@ func TestCreateReminder(t *testing.T) {
 	}
 }
 
+// TestParseReminderText exercises ParseReminderText directly (not just indirectly
+// via CreateReminder, which now calls it internally) - the exhaustive
+// parsing-edge-case coverage already lives in TestCreateReminder since
+// it's the exact same code; this just proves ParseReminderText's own contract:
+// task+due returned directly, nothing saved, no OutboundTopics/etc needed.
+func TestParseReminderText(t *testing.T) {
+	fixedNow := time.Date(2026, 6, 15, 9, 0, 0, 0, time.Local)
+
+	tests := []struct {
+		name        string
+		inputText   string
+		wantTask    string
+		wantDue     time.Time
+		wantErr     bool
+		wantErrText string
+	}{
+		{"valid reminder with relative time", "buy milk in 3 days", "buy milk", fixedNow.AddDate(0, 0, 3), false, ""},
+		{"empty text", "", "", time.Time{}, true, "empty reminder text"},
+		{"whitespace-only text", "   ", "", time.Time{}, true, "empty reminder text"},
+		{"no time information", "buy eggs", "", time.Time{}, true, "no time information found"},
+		{"no task text", "in 3 days", "", time.Time{}, true, "no task text found"},
+		{"due time in the past", "buy milk yesterday", "", time.Time{}, true, "is in the past"},
+		{"string longer than maxReminderTextLength", strings.Repeat("a", 4097), "", time.Time{}, true, "reminder text too long"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &mockStore{}
+			svc := New(store)
+			svc.now = func() time.Time { return fixedNow }
+
+			task, due, err := svc.ParseReminderText(tt.inputText)
+
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ParseReminderText(%q) error = %v, wantErr %v", tt.inputText, err, tt.wantErr)
+			}
+			if tt.wantErr {
+				if !errors.Is(err, ErrInvalidInput) {
+					t.Errorf("ParseReminderText(%q) error = %v, want it to wrap ErrInvalidInput", tt.inputText, err)
+				}
+				if !strings.Contains(err.Error(), tt.wantErrText) {
+					t.Errorf("ParseReminderText(%q) error = %q, want it to contain %q", tt.inputText, err.Error(), tt.wantErrText)
+				}
+				return
+			}
+
+			if task != tt.wantTask {
+				t.Errorf("ParseReminderText(%q) task = %q, want %q", tt.inputText, task, tt.wantTask)
+			}
+			if !due.Equal(tt.wantDue) {
+				t.Errorf("ParseReminderText(%q) due = %v, want %v", tt.inputText, due, tt.wantDue)
+			}
+			if len(store.saved) != 0 {
+				t.Errorf("ParseReminderText(%q) saved %d reminders to the store, want 0 (preview must not persist)", tt.inputText, len(store.saved))
+			}
+		})
+	}
+}
+
 func TestCreateReminder_StoreError(t *testing.T) {
 	proxyErr := errors.New("disk full")
 	store := &mockStore{saveErr: proxyErr}
