@@ -9,51 +9,77 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/zawnk/later/internal/actiontoken"
 	"github.com/zawnk/later/internal/config"
 	"github.com/zawnk/later/internal/reminder"
 	"github.com/zawnk/later/internal/service"
 )
 
 type API struct {
-	cfg *config.Config
-	svc *service.Service
+	cfg              *config.Config
+	svc              *service.Service
+	actionSecret     []byte
+	actionTokensUsed *actiontoken.UsedTokenTracker
 }
 
-func New(cfg *config.Config, svc *service.Service) *API {
-	return &API{cfg: cfg, svc: svc}
+func New(cfg *config.Config, svc *service.Service, actionSecret []byte) *API {
+	return &API{cfg: cfg, svc: svc, actionSecret: actionSecret, actionTokensUsed: actiontoken.NewUsedTracker()}
 }
 
 func (a *API) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /reminders", a.auth(a.createReminder))
-	mux.HandleFunc("GET /reminders", a.auth(a.listPending))
-	mux.HandleFunc("GET /reminders/archive", a.auth(a.listArchive))
-	mux.HandleFunc("GET /reminders/next", a.auth(a.nextReminder))
-	mux.HandleFunc("GET /reminders/last", a.auth(a.lastReminder))
-	mux.HandleFunc("GET /reminders/{id}", a.auth(a.getReminder))
-	mux.HandleFunc("DELETE /reminders/{id}", a.auth(a.cancelReminder))
-	mux.HandleFunc("POST /reminders/{id}/postpone", a.auth(a.postponeReminder))
+	mux.HandleFunc("POST /reminders", a.auth(a.createReminder, ""))
+	mux.HandleFunc("GET /reminders", a.auth(a.listPending, ""))
+	mux.HandleFunc("GET /reminders/archive", a.auth(a.listArchive, ""))
+	mux.HandleFunc("GET /reminders/next", a.auth(a.nextReminder, ""))
+	mux.HandleFunc("GET /reminders/last", a.auth(a.lastReminder, ""))
+	mux.HandleFunc("GET /reminders/{id}", a.auth(a.getReminder, ""))
+	mux.HandleFunc("DELETE /reminders/{id}", a.auth(a.cancelReminder, ""))
+	mux.HandleFunc("POST /reminders/{id}/postpone", a.auth(a.postponeReminder, "postpone"))
 	mux.HandleFunc("GET /healthz", a.healthz)
 
 	return mux
 }
 
-func (a *API) auth(next http.HandlerFunc) http.HandlerFunc {
+// auth authenticates a request against the configured auth_tokens list.
+// actionTokenScope, when non-empty, additionally accepts a scoped jwt
+// token (see internal/actiontoken) for exactly that action on this
+// route - the fallback a fired notification's action button uses. Empty
+// for every route except postpone: a token scoped to "postpone" only
+// ever verifies against actionTokenScope == "postpone", so it can't
+// authenticate anywhere else no matter how many routes share this one
+// function, since each route declares its own expected scope explicitly.
+// An action token is also single-use (via actionTokensUsed) - both of a
+// reminder's action buttons share one minted token, and the same
+// notification can land on more than one subscribed device, so without
+// this a second tap (another button, another device) would silently
+// postpone the same reminder twice.
+func (a *API) auth(next http.HandlerFunc, actionTokenScope string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		presented, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if !ok {
 			writeJSONError(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 
-		verifiedToken, authorized := a.tokenCompare(token)
-		if !authorized {
-			writeJSONError(w, "unauthorized", http.StatusUnauthorized)
+		if verifiedToken, authorized := a.tokenCompare(presented); authorized {
+			r = r.WithContext(contextWithToken(r.Context(), verifiedToken))
+			next(w, r)
 			return
 		}
 
-		r = r.WithContext(contextWithToken(r.Context(), verifiedToken))
-		next(w, r)
+		if actionTokenScope != "" {
+			if claims, err := actiontoken.Verify(a.actionSecret, presented, r.PathValue("id"), actionTokenScope); err == nil {
+				if !a.actionTokensUsed.MarkUsed(claims.ID, claims.ExpiresAt.Time) {
+					writeJSONError(w, "action token already used", http.StatusUnauthorized)
+					return
+				}
+				next(w, r)
+				return
+			}
+		}
+
+		writeJSONError(w, "unauthorized", http.StatusUnauthorized)
 	}
 }
 
@@ -257,7 +283,6 @@ func (a *API) postponeReminder(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err, "failed to postpone reminder")
 		return
 	}
-
 	writeJsonResponse(w, http.StatusCreated, rem)
 }
 

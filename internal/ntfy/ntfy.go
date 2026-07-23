@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/mergestat/timediff"
 
+	"github.com/zawnk/later/internal/actiontoken"
 	"github.com/zawnk/later/internal/config"
 	"github.com/zawnk/later/internal/reminder"
 )
@@ -52,6 +54,7 @@ type ntfyMessageModifications struct {
 	tags     []string
 	priority string
 	click    string
+	actions  string
 }
 
 func priorityRank(p string) int {
@@ -71,14 +74,16 @@ func priorityRank(p string) int {
 
 type Client struct {
 	cfg             *config.Config
+	actionSecret    []byte
 	publishClient   *http.Client
 	subscribeClient *http.Client
 	reconnectWait   time.Duration
 }
 
-func New(cfg *config.Config) *Client {
+func New(cfg *config.Config, actionSecret []byte) *Client {
 	return &Client{
-		cfg: cfg,
+		cfg:          cfg,
+		actionSecret: actionSecret,
 		publishClient: &http.Client{
 			Timeout: 15 * time.Second,
 		},
@@ -100,6 +105,11 @@ func (c *Client) Send(ctx context.Context, r reminder.Reminder, late bool) error
 		text += fmt.Sprintf("\n(set %s)", timediff.TimeDiff(r.CreatedAt))
 	}
 
+	actions, err := c.buildActions(r.ID)
+	if err != nil {
+		slog.Error("failed to build action buttons, sending notification without them", "id", r.ID, "err", err)
+	}
+
 	for _, topic := range topics {
 		mods := ntfyMessageModifications{
 			title:    "Reminder",
@@ -107,12 +117,40 @@ func (c *Client) Send(ctx context.Context, r reminder.Reminder, late bool) error
 			tags:     r.Tags,
 			priority: r.Priority,
 			click:    r.Click,
+			actions:  actions,
 		}
 		if err := c.sendToTopic(ctx, text, topic, mods); err != nil {
 			return fmt.Errorf("failed to send to topic %s: %w", topic, err)
 		}
 	}
 	return nil
+}
+
+// buildActions mints one postpone token for reminderID (the token only
+// grants "postpone this reminder" and returns the ntfy Actions header
+// value for the "Snooze 1h"/"Tomorrow" buttons, or "" if base_url isn't
+// configured (the feature just stays off).
+func (c *Client) buildActions(reminderID string) (string, error) {
+	if c.cfg.Server.BaseURL == "" {
+		return "", nil
+	}
+
+	token, err := actiontoken.Mint(c.actionSecret, reminderID, "postpone")
+	if err != nil {
+		return "", err
+	}
+
+	base := strings.TrimRight(config.NormalizedBaseURL(c.cfg.Server.BaseURL), "/") + "/reminders/" + reminderID + "/postpone"
+
+	labels := []string{"Snooze 1h", "Tomorrow"}
+	durations := []string{"in 1h", "tomorrow morning"}
+	actions := make([]string, len(labels))
+	for i, label := range labels {
+		callback := base + "?duration=" + url.QueryEscape(durations[i])
+		actions[i] = fmt.Sprintf("http, %s, %s, method=POST, headers.Authorization=Bearer %s, clear=true", label, callback, token)
+	}
+
+	return strings.Join(actions, "; "), nil
 }
 
 func (c *Client) sendToTopic(ctx context.Context, text, topic string, mods ...ntfyMessageModifications) error {
@@ -150,6 +188,10 @@ func (c *Client) sendToTopic(ctx context.Context, text, topic string, mods ...nt
 
 	if mod.click != "" {
 		req.Header.Set("Click", mod.click)
+	}
+
+	if mod.actions != "" {
+		req.Header.Set("Actions", mod.actions)
 	}
 
 	if mod.title != "" {

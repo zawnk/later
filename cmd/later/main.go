@@ -318,7 +318,7 @@ func (c *CancelCmd) Run(a *app) error {
 
 type PostponeCmd struct {
 	ID       string `arg:"" help:"Reminder id, or 'last' for the one most recently created by this CLI."`
-	Duration string `arg:"" help:"How far to push it from now, e.g. 1d, 2h30m."`
+	Duration string `arg:"" help:"How far to push it from now: a compact duration (1d, 2h30m) or natural language (tomorrow morning, next monday)."`
 }
 
 func (p *PostponeCmd) Run(a *app) error {
