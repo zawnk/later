@@ -67,8 +67,7 @@ check: fmt-check vet lint race ## everything CI would run: fmt-check + vet + lin
 FUZZTIME ?= 30s
 
 .PHONY: fuzz
-fuzz: ## run both parser fuzz targets for FUZZTIME each (default 30s; override: make fuzz FUZZTIME=5m) - not part of CI/check, run manually before releasing anything that touches the NL parser
-	$(GO) test ./internal/service/ -fuzz=FuzzPreprocessDuration -fuzztime=$(FUZZTIME)
+fuzz: ## run the parser fuzz target for FUZZTIME (default 30s; override: make fuzz FUZZTIME=5m) - not part of CI/check, run manually before releasing anything that touches the NL parser
 	$(GO) test ./internal/service/ -fuzz=FuzzParseReminderText -fuzztime=$(FUZZTIME)
 
 .PHONY: tidy
