@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/olebedev/when"
 	"github.com/zawnk/later/internal/reminder"
 )
 
@@ -149,6 +150,90 @@ func TestResolveFutureMonthSlashDate(t *testing.T) {
 			}
 			if tt.wantOK && !due.Equal(tt.wantDue) {
 				t.Errorf("resolveFutureMonthSlashDate(%q) due = %v, want %v", tt.text, due, tt.wantDue)
+			}
+		})
+	}
+}
+
+// TestRollFutureMonthNameDate exercises rollFutureMonthNameDate directly,
+// constructing when.Result values by hand so each guard can be tested in
+// isolation without depending on exactly what olebedev/when's own
+// ExactMonthDate rule happens to produce.
+func TestRollFutureMonthNameDate(t *testing.T) {
+	ref := time.Date(2026, 11, 1, 9, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name    string
+		text    string
+		result  when.Result
+		wantOK  bool
+		wantDue time.Time
+	}{
+		{
+			"month already passed this year, ordinal day - the gap this fixes",
+			"march 3rd wrap presents",
+			when.Result{Text: "march 3rd", Index: 0, Time: time.Date(2026, 3, 3, 9, 0, 0, 0, time.UTC)},
+			true, time.Date(2027, 3, 3, 9, 0, 0, 0, time.UTC),
+		},
+		{
+			"month already passed this year, bare number day",
+			"march 3 wrap presents",
+			when.Result{Text: "march 3", Index: 0, Time: time.Date(2026, 3, 3, 9, 0, 0, 0, time.UTC)},
+			true, time.Date(2027, 3, 3, 9, 0, 0, 0, time.UTC),
+		},
+		{
+			"nothing trailing the match at all - end of string",
+			"march 3rd",
+			when.Result{Text: "march 3rd", Index: 0, Time: time.Date(2026, 3, 3, 9, 0, 0, 0, time.UTC)},
+			true, time.Date(2027, 3, 3, 9, 0, 0, 0, time.UTC),
+		},
+		{
+			"still in the future - no rollover needed",
+			"december 25 buy presents",
+			when.Result{Text: "december 25", Index: 0, Time: time.Date(2026, 12, 25, 9, 0, 0, 0, time.UTC)},
+			false, time.Time{},
+		},
+		{
+			"no month name in the matched text - e.g. a weekday/relative match that also happens to be past",
+			"last monday call mom",
+			when.Result{Text: "last monday", Index: 0, Time: time.Date(2026, 10, 26, 9, 0, 0, 0, time.UTC)},
+			false, time.Time{},
+		},
+		{
+			"two bare digit runs - the ambiguous shape that can misread the second as the day, not trustworthy enough to roll forward",
+			"17 april 85 pay off the loan",
+			when.Result{Text: "17 april 85", Index: 0, Time: time.Date(2026, 6, 24, 9, 0, 0, 0, time.UTC)},
+			false, time.Time{},
+		},
+		{
+			"a year-shaped token immediately follows with a comma - explicit (if unusable) year, don't substitute a different one",
+			"february 14, 2004 something",
+			when.Result{Text: "february 14", Index: 0, Time: time.Date(2026, 2, 14, 9, 0, 0, 0, time.UTC)},
+			false, time.Time{},
+		},
+		{
+			"a year-shaped token immediately follows with just a space",
+			"october 12 2030 something",
+			when.Result{Text: "october 12", Index: 0, Time: time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)},
+			false, time.Time{},
+		},
+		{
+			"real task text (non-digit) trailing the match rolls forward normally",
+			"march 3rd wrap the presents",
+			when.Result{Text: "march 3rd", Index: 0, Time: time.Date(2026, 3, 3, 9, 0, 0, 0, time.UTC)},
+			true, time.Date(2027, 3, 3, 9, 0, 0, 0, time.UTC),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := tt.result
+			due, ok := rollFutureMonthNameDate(tt.text, &r, ref)
+			if ok != tt.wantOK {
+				t.Fatalf("rollFutureMonthNameDate(%q) ok = %v, want %v", tt.text, ok, tt.wantOK)
+			}
+			if tt.wantOK && !due.Equal(tt.wantDue) {
+				t.Errorf("rollFutureMonthNameDate(%q) due = %v, want %v", tt.text, due, tt.wantDue)
 			}
 		})
 	}
@@ -309,6 +394,10 @@ func TestCreateReminder(t *testing.T) {
 		{"compact duration: combined hours+minutes", "check the oven in 2h30m", []string{"topic-a"}, "check the oven", fixedNow.Add(2*time.Hour + 30*time.Minute), false},
 		{"compact duration: every unit combined", "renew everything in 1y2mo3w4d5h6m", []string{"topic-a"}, "renew everything", fixedNow.AddDate(1, 2, 25).Add(5*time.Hour + 6*time.Minute), false},
 		{"exact calendar date", "defrost the freezer october 21st", []string{"topic-a"}, "defrost the freezer", time.Date(2026, 10, 21, 9, 0, 0, 0, time.Local), false},
+		{"exact calendar date, month already passed this year - rolls to next year instead of failing past-due (ordinal day)", "wrap presents march 3rd", []string{"topic-a"}, "wrap presents", time.Date(2027, 3, 3, 9, 0, 0, 0, time.Local), false},
+		{"same rollover, leading bare-number day instead of an ordinal", "pay rent 3 march", []string{"topic-a"}, "pay rent", time.Date(2027, 3, 3, 9, 0, 0, 0, time.Local), false},
+		{"the ambiguous two-bare-digit-run shape is deliberately left unrescued - stays past-due even though the month has also passed", "17 january 85 pay off the loan", []string{"topic-a"}, "", time.Time{}, true},
+		{"a year-shaped token trailing the match is deliberately left unrescued too - explicit (if unusable) year, not silently substituted", "sort out the paperwork march 3rd 2004", []string{"topic-a"}, "", time.Time{}, true},
 		{"combined weekday and time", "pick up the dry cleaning next tuesday at 2pm", []string{"topic-a"}, "pick up the dry cleaning", time.Date(2026, 6, 16, 14, 0, 0, 0, time.Local), false},
 		{"a duration-shaped substring inside the task text is not rewritten", "in 3d buy 5m of rope", []string{"topic-a"}, "buy 5m of rope", fixedNow.AddDate(0, 0, 3), false},
 		{"a second duration-shaped substring later in the task is left alone too", "remind me in 2h to check the 5h parking meter", []string{"topic-a"}, "remind me to check the 5h parking meter", fixedNow.Add(2 * time.Hour), false},
