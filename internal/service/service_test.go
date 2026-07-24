@@ -31,40 +31,6 @@ func (m *mockStore) ListArchive() ([]reminder.ArchivedReminder, error) {
 }
 func (m *mockStore) CancelReminder(id string) (bool, error) { return false, nil }
 
-func TestPreprocessDuration(t *testing.T) {
-	tests := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{"in-prefixed day", "in 3d", "in 3 days"},
-		{"within-prefixed day", "within 3d", "within 3 days"},
-		{"weeks", "in 4w test", "in 4 weeks test"},
-		{"months", "in 3mo time", "in 3 months time"},
-		{"three letter mon", "pok3 mon", "pok3 mon"},
-		{"years", "in 10y is a decade", "in 10 years is a decade"},
-		{"seconds", "in 60s make a minute", "in 60 seconds make a minute"},
-		{"no time included", "no time included", "no time included"},
-		{"bare unit with no in/within is left untouched", "3d", "3d"},
-		{"bare months left untouched", "3mo time", "3mo time"},
-		{"no longer matches inside a word)", "in server1h down", "in server1h down"},
-		{"no longer matches inside a word)", "in remind me to check server1h status", "in remind me to check server1h status"},
-		{"combined units are no longer this function's job", "in 2h30m", "in 2h30m"},
-		{"combined units are no longer this function's job, full combo", "in 1y2mo3w4d5h6m7s", "in 1y2mo3w4d5h6m7s"},
-		{"extra whitespace around the unit doesn't leave a double space", "in 3d  call the plumber", "in 3 days call the plumber"},
-		{"a non-in-prefixed unit earlier in the text is left alone", "buy 2h of parking in 3d", "buy 2h of parking in 3 days"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := preprocessDuration(tt.in)
-			if got != tt.want {
-				t.Errorf("preprocessDuration(%q) = %q, want %q", tt.in, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestCollapseWhitespace(t *testing.T) {
 	tests := []struct {
 		name string
@@ -147,6 +113,47 @@ func TestIsUnambiguousDurationRun(t *testing.T) {
 	}
 }
 
+// TestResolveFutureMonthSlashDate covers the workaround for the confirmed
+// olebedev/when bug (rules/common/slash_dmy.go@v1.1.0 - see the function's
+// own doc comment, and https://github.com/olebedev/when/pull/34): a bare
+// "DD/MM" naming a month later in the current year than "now" used to
+// silently resolve to "now" instead of the intended date. `ref` is fixed
+// at 2026-06-15 (June) to exercise all three relative positions: month
+// before ref's month (already passed - rolls to next year), the same
+// month (day before/after/on today), and month after ref's month (the
+// bug this function fixes).
+func TestResolveFutureMonthSlashDate(t *testing.T) {
+	ref := time.Date(2026, 6, 15, 9, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name    string
+		text    string
+		wantOK  bool
+		wantDue time.Time
+	}{
+		{"month later in the current year - the bug this fixes", "25/12 wrap presents", true, time.Date(2026, 12, 25, 9, 0, 0, 0, time.UTC)},
+		{"month later in the current year, single-digit day/month", "1/8 pay rent", true, time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)},
+		{"an explicit year is left to when.Parse untouched", "25/12/2026 wrap presents", false, time.Time{}},
+		{"a month already passed this year is left to when.Parse untouched (it already rolls to next year correctly)", "5/6 pay rent", false, time.Time{}},
+		{"the same month as ref is left to when.Parse untouched", "20/6 pay rent", false, time.Time{}},
+		{"no slash date present at all", "buy milk tomorrow", false, time.Time{}},
+		{"invalid day for that month declines rather than silently normalizing (April has 30 days)", "31/4 pay rent", false, time.Time{}},
+		{"invalid day for February in a non-leap year declines", "29/2 pay rent", false, time.Time{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, due, ok := resolveFutureMonthSlashDate(tt.text, ref)
+			if ok != tt.wantOK {
+				t.Fatalf("resolveFutureMonthSlashDate(%q) ok = %v, want %v", tt.text, ok, tt.wantOK)
+			}
+			if tt.wantOK && !due.Equal(tt.wantDue) {
+				t.Errorf("resolveFutureMonthSlashDate(%q) due = %v, want %v", tt.text, due, tt.wantDue)
+			}
+		})
+	}
+}
+
 // TestParseDueTime_CombinedDurationDST proves parseDueTime's combined-unit
 // branch (2+ chained compact units, e.g. "1d2h") still preserves
 // wall-clock time across a DST transition - the same guarantee
@@ -174,6 +181,47 @@ func TestParseDueTime_CombinedDurationDST(t *testing.T) {
 	want := from.AddDate(0, 0, 1).Add(2 * time.Hour)
 	if !due.Equal(want) {
 		t.Errorf("parseDueTime(\"1d2h\") across DST = %v, want %v (wall-clock-preserving day, then a real 2h)", due, want)
+	}
+}
+
+// TestParseDueTime_SingleUnitYearRollover proves single compact units
+// ("in 1mo", "in 2y", etc.) resolve via our own AddDate arithmetic, not
+// when.Parse's "Deadline" rule - which has a confirmed, unfixed bug for
+// months specifically (rules/en/deadline.go@v1.1.0: its "in N months"
+// case computes `(ref.Month()+num) % 12` with no year carry at all, so
+// "in 1 month" from December used to silently land in January of the
+// *current* year instead of next year - verified directly against the
+// dependency, later code wasn't involved). `from` is fixed at December
+// 31st specifically to force every one of these across a year boundary.
+func TestParseDueTime_SingleUnitYearRollover(t *testing.T) {
+	svc := New(&mockStore{})
+	from := time.Date(2026, 12, 31, 9, 0, 0, 0, time.UTC)
+	svc.now = func() time.Time { return from }
+
+	tests := []struct {
+		name string
+		text string
+		want time.Time
+	}{
+		{"single month - the bug this proves is fixed", "in 1mo", from.AddDate(0, 1, 0)},
+		{"two months", "in 2mo", from.AddDate(0, 2, 0)},
+		{"single year", "in 1y", from.AddDate(1, 0, 0)},
+		{"single day still rolls over correctly (never affected)", "in 1d", from.AddDate(0, 0, 1)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, due, err := svc.parseDueTime(tt.text)
+			if err != nil {
+				t.Fatalf("parseDueTime(%q) error = %v", tt.text, err)
+			}
+			if !due.Equal(tt.want) {
+				t.Errorf("parseDueTime(%q) = %v, want %v", tt.text, due, tt.want)
+			}
+			if due.Year() != 2027 {
+				t.Errorf("parseDueTime(%q) year = %d, want 2027 (must roll over, not stay in the current year)", tt.text, due.Year())
+			}
+		})
 	}
 }
 
@@ -233,6 +281,9 @@ func TestCreateReminder(t *testing.T) {
 		{"embedded multi-unit sequence inside a word is not a duration, combined-run path)", "check server1h2m status", []string{"topic-a"}, "", time.Time{}, true},
 		{"valid reminder with calendar date", "marathon is on 10/10/2026", []string{"topic-a"}, "marathon is on", time.Date(2026, 10, 10, 9, 0, 0, 0, time.Local), false},
 		{"slash date is day/month, not month/day", "book the campsite 28/07/2026", []string{"topic-a"}, "book the campsite", time.Date(2026, 7, 28, 9, 0, 0, 0, time.Local), false},
+		{"bare slash date for a month later this year - the olebedev/when bug workaround (PR #34, unmerged)", "wrap presents 25/12", []string{"topic-a"}, "wrap presents", time.Date(2026, 12, 25, 9, 0, 0, 0, time.Local), false},
+		{"bare slash date for a month already passed this year still rolls to next year, unaffected by the workaround", "renew the car registration 1/1", []string{"topic-a"}, "renew the car registration", time.Date(2027, 1, 1, 9, 0, 0, 0, time.Local), false},
+		{"bare slash date with an invalid day for that month is rejected, not silently normalized", "pay rent 31/4", []string{"topic-a"}, "", time.Time{}, true},
 		{"weekday expression", "let's meet next tuesday", []string{"topic-a"}, "let's meet", time.Date(2026, 06, 16, 9, 0, 0, 0, time.Local), false},
 		{"just a time string", "in 2 hours", []string{"topic-a"}, "", time.Time{}, true},
 		{"due date in the past", "buy milk yesterday", []string{"topic-a"}, "", time.Time{}, true},
@@ -243,6 +294,17 @@ func TestCreateReminder(t *testing.T) {
 		{"multiple outbound topics are passed through", "buy milk in 3 days", []string{"topic-a", "topic-b"}, "buy milk", fixedNow.AddDate(0, 0, 3), false},
 		{"nil outbound topics are passed through", "buy milk in 3 days", nil, "buy milk", fixedNow.AddDate(0, 0, 3), false},
 		{"compact duration: single unit", "buy milk in 3d", []string{"topic-a"}, "buy milk", fixedNow.AddDate(0, 0, 3), false},
+		{"compact duration: single unit, weeks (not covered elsewhere - the other single-unit cases happen to use days/hours)", "water the tomatoes in 4w", []string{"topic-a"}, "water the tomatoes", fixedNow.AddDate(0, 0, 28), false},
+		{"compact duration: single unit, minutes", "take a break in 45m", []string{"topic-a"}, "take a break", fixedNow.Add(45 * time.Minute), false},
+		{"compact duration: single unit, seconds (rounds to the nearest minute per the app's own minute-granularity design)", "blink in 30s", []string{"topic-a"}, "blink", fixedNow.Add(30 * time.Second).Round(time.Minute), false},
+		{"compact duration: single unit, months, away from any year boundary (TestParseDueTime_SingleUnitYearRollover only covers this at Dec 31 specifically)", "pay rent in 3mo", []string{"topic-a"}, "pay rent", fixedNow.AddDate(0, 3, 0), false},
+		{"compact duration: single unit, years, away from any year boundary (same reasoning)", "renew the passport in 10y", []string{"topic-a"}, "renew the passport", fixedNow.AddDate(10, 0, 0), false},
+		{"a bare single unit alone, with no in/within anywhere, is not a duration at all", "3d", []string{"topic-a"}, "", time.Time{}, true},
+		{"a bare single unit plus unrelated text, still no in/within anywhere, is not a duration either", "3mo time", []string{"topic-a"}, "", time.Time{}, true},
+		{"singleUnitRegex doesn't match inside a word even when \"in\" appears earlier as its own word", "in server1h down", []string{"topic-a"}, "", time.Time{}, true},
+		{"same embedded-in-word guard with more realistic surrounding task text", "in remind me to check server1h status", []string{"topic-a"}, "", time.Time{}, true},
+		{"the trailing word-boundary rejects a unit letter immediately followed by more letters, not just a separate word (when.Parse has no fallback for \"dog\", unlike \"day\")", "in 3dog buy milk", []string{"topic-a"}, "", time.Time{}, true},
+		{"extra whitespace left behind by a single-unit match still collapses to one space", "buy milk in 3d  call the plumber", []string{"topic-a"}, "buy milk call the plumber", fixedNow.AddDate(0, 0, 3), false},
 		{"compact duration: combined weeks+days", "clean the gutters in 1w2d", []string{"topic-a"}, "clean the gutters", fixedNow.AddDate(0, 0, 9), false},
 		{"compact duration: combined hours+minutes", "check the oven in 2h30m", []string{"topic-a"}, "check the oven", fixedNow.Add(2*time.Hour + 30*time.Minute), false},
 		{"compact duration: every unit combined", "renew everything in 1y2mo3w4d5h6m", []string{"topic-a"}, "renew everything", fixedNow.AddDate(1, 2, 25).Add(5*time.Hour + 6*time.Minute), false},
@@ -306,6 +368,36 @@ func TestCreateReminder(t *testing.T) {
 	}
 }
 
+// TestCreateReminder_SingleUnitYearRollover proves the "in 1mo" year-carry
+// fix end-to-end through the real CreateReminder pipeline, not just the
+// isolated parseDueTime call TestParseDueTime_SingleUnitYearRollover
+// covers. Needs its own fixed clock (December 31st) since
+// TestCreateReminder's shared table clock (mid-June) never crosses a
+// year boundary for a single-month duration and so can't discriminate
+// this bug.
+func TestCreateReminder_SingleUnitYearRollover(t *testing.T) {
+	fixedNow := time.Date(2026, 12, 31, 9, 0, 0, 0, time.Local)
+	store := &mockStore{}
+	svc := New(store)
+	svc.now = func() time.Time { return fixedNow }
+
+	rem, err := svc.CreateReminder(CreateInput{Text: "pay the mortgage in 1mo", OutboundTopics: []string{"topic-a"}})
+	if err != nil {
+		t.Fatalf("CreateReminder() error = %v", err)
+	}
+
+	want := fixedNow.AddDate(0, 1, 0)
+	if !rem.DueAt.Equal(want) {
+		t.Errorf("CreateReminder(\"pay the mortgage in 1mo\") DueAt = %v, want %v", rem.DueAt, want)
+	}
+	if rem.DueAt.Year() != 2027 {
+		t.Errorf("CreateReminder(\"pay the mortgage in 1mo\") year = %d, want 2027 (must roll over)", rem.DueAt.Year())
+	}
+	if rem.Text != "pay the mortgage" {
+		t.Errorf("CreateReminder(\"pay the mortgage in 1mo\") text = %q, want %q", rem.Text, "pay the mortgage")
+	}
+}
+
 // TestParseReminderText exercises ParseReminderText directly (not just indirectly
 // via CreateReminder, which now calls it internally) - the exhaustive
 // parsing-edge-case coverage already lives in TestCreateReminder since
@@ -365,30 +457,6 @@ func TestParseReminderText(t *testing.T) {
 	}
 }
 
-// FuzzPreprocessDuration hunts for panics in the pure regex-rewrite step -
-// seeded from TestPreprocessDuration's own table so the fuzzer starts from
-// every already-known interesting shape (flagged/unflagged units, combined
-// runs it must leave alone, embedded-in-word near-misses) rather than
-// from scratch. No correctness oracle for arbitrary input - the only
-// invariant checked is "doesn't panic," which is what fuzzing is actually
-// good for here; exact-output correctness is TestPreprocessDuration's job.
-func FuzzPreprocessDuration(f *testing.F) {
-	seeds := []string{
-		"in 3d", "within 3d", "in 4w test", "in 3mo time", "pok3 mon",
-		"in 10y is a decade", "in 60s make a minute", "no time included",
-		"3d", "3mo time", "in server1h down", "in 2h30m",
-		"in 1y2mo3w4d5h6m7s", "in 3d  call the plumber", "", "   ",
-		strings.Repeat("in 9d ", 500),
-	}
-	for _, s := range seeds {
-		f.Add(s)
-	}
-
-	f.Fuzz(func(t *testing.T, input string) {
-		preprocessDuration(input)
-	})
-}
-
 // FuzzParseReminderText hunts for panics and invariant violations in the
 // full task/due-time extraction pipeline - the actual user-facing surface
 // (CreateReminder, /test/parse, ntfy's inbound "/test", and the "/test"
@@ -425,6 +493,13 @@ func FuzzParseReminderText(f *testing.F) {
 		"   ",
 		"marathon is on 10/10/2026",
 		"pick up the dry cleaning next tuesday at 2pm",
+		"wrap presents 25/12",
+		"pay rent 31/4",
+		"pay rent 29/2",
+		"in server1h down",
+		"in 3d  call the plumber",
+		"call mom in 1mo",
+		"call mom in 2mo",
 		"in 99999999999999999999999999y call mom",
 		strings.Repeat("a", 5000),
 		strings.Repeat("in 1d ", 1000),
