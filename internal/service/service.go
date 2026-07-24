@@ -32,7 +32,13 @@
 //     passed this year; the same month as now) is already correct in
 //     that rule and is left to when.Parse untouched.
 //  4. Everything else - "tomorrow", "next monday", calendar dates, times
-//     of day - goes straight to when.Parse.
+//     of day - goes straight to when.Parse. If the match came from
+//     ExactMonthDate (a spelled-out month name, e.g. "march 3rd") and
+//     landed in the past only because that rule never considers a year at
+//     all, rollFutureMonthNameDate rolls it to next year - the one thing
+//     SlashDMY already gets right on its own that ExactMonthDate doesn't.
+//     See rollFutureMonthNameDate's doc comment for the narrow conditions
+//     this applies under.
 //
 // Postpone uses the same pipeline via resolvePostponeTime, which
 // additionally requires the match to consume the whole input (no task
@@ -74,6 +80,9 @@ var singleUnitRegex = regexp.MustCompile(`(^|\s)(in|within) (\d+)(y|mo|w|d|h|m|s
 var combinedDurationRegex = regexp.MustCompile(`(^|\s)((?:in |within )?(?:\d+(?:y|mo|w|d|h|m|s)){2,})\b`)
 var durationRegex = regexp.MustCompile(`(\d+)(y|mo|w|d|h|m|s)`)
 var slashDateRegex = regexp.MustCompile(`(?:^|\W)(0?[1-9]|[12][0-9]|3[01])[/\\](0?[1-9]|1[0-2])(?:[/\\]((?:1|2)[0-9]{3}))?(?:\W|$)`)
+var monthNamePattern = regexp.MustCompile(`(?i)\b` + en.MONTH_OFFSET_PATTERN)
+var digitRunPattern = regexp.MustCompile(`\d+`)
+var trailingYearLikePattern = regexp.MustCompile(`^[\s,]*\d{1,4}`)
 
 func sumDurationMatches(matches [][]string) (years, months, days int, clock time.Duration) {
 	for _, match := range matches {
@@ -258,7 +267,53 @@ func (s *Service) parseDueTime(text string) (textForTask, matchedText string, pa
 	if result == nil {
 		return "", "", time.Time{}, fmt.Errorf("%w: no time information found in: %q", ErrInvalidInput, text)
 	}
+	if due, ok := rollFutureMonthNameDate(text, result, s.now()); ok {
+		return text, result.Text, due, nil
+	}
 	return text, result.Text, result.Time, nil
+}
+
+// rollFutureMonthNameDate works around a missing feature (not a bug, just
+// an asymmetry) in olebedev/when's ExactMonthDate rule
+// (rules/en/exact_month_date.go@v1.1.0, verified against the dependency
+// source): unlike SlashDMY (which already rolls a passed month to next
+// year on its own, see resolveFutureMonthSlashDate), ExactMonthDate never
+// parses or considers a year at all - a spelled-out month name ("march
+// 3rd", "3 march", "twentieth of december") always resolves in ref's
+// current year, even when that date has already passed this year, leaving
+// it to later's own past-due guard to reject outright rather than roll
+// forward the way a future-only reminder app should.
+//
+// Deliberately narrow, mirroring resolveFutureMonthSlashDate's caution:
+//   - only acts when when.Parse's own matched text contains a recognized
+//     month name at all - never touches a weekday/relative match that
+//     happens to also land in the past ("yesterday", "last monday"),
+//     which should stay rejected, not get silently reinterpreted a year
+//     later
+//   - backs off if the matched text has more than one bare digit run
+//     (e.g. "17 april 85") - that's the one confirmed shape where
+//     ExactMonthDate misreads a trailing number as a second day value
+//     instead of a year, silently overwriting the real day (see
+//     docs/maintainers-manual.md) - the already-resolved date can't be
+//     trusted enough to roll forward on top of
+//   - backs off if anything year-shaped immediately follows the match in
+//     the original text (e.g. "february 14, 2004") - the user typed an
+//     explicit (if unusable-by-when) year, so silently substituting a
+//     different one would be worse than leaving it to fail as past-due
+func rollFutureMonthNameDate(text string, result *when.Result, ref time.Time) (time.Time, bool) {
+	if !result.Time.Before(ref) {
+		return time.Time{}, false
+	}
+	if !monthNamePattern.MatchString(result.Text) {
+		return time.Time{}, false
+	}
+	if len(digitRunPattern.FindAllString(result.Text, -1)) > 1 {
+		return time.Time{}, false
+	}
+	if end := result.Index + len(result.Text); end <= len(text) && trailingYearLikePattern.MatchString(text[end:]) {
+		return time.Time{}, false
+	}
+	return result.Time.AddDate(1, 0, 0), true
 }
 
 // resolveFutureMonthSlashDate works around a confirmed, unfixed bug in
