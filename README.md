@@ -7,6 +7,7 @@
 A self-hosted reminder service, tightly coupled with [ntfy](https://ntfy.sh) - set reminders in plain English, get them back as push notifications.
 
 ```
+later in 25 minutes start the laundry
 later in 3d rotate the tires
 later next tuesday at 2pm pick up the dry cleaning
 later march 3rd sort out the tax paperwork
