@@ -20,7 +20,8 @@ type Reminder struct {
 
 type ArchivedReminder struct {
 	Reminder
-	FiredAt time.Time `json:"fired_at"`
+	FiredAt        time.Time         `json:"fired_at"`
+	NtfyMessageIDs map[string]string `json:"ntfy_message_ids,omitempty"`
 }
 
 func GenerateID() string {
