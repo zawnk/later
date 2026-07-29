@@ -22,14 +22,14 @@ type notifyCall struct {
 	late bool
 }
 
-func (n *notifyRecorder) notify(ctx context.Context, r reminder.Reminder, late bool) error {
+func (n *notifyRecorder) notify(ctx context.Context, r reminder.Reminder, late bool) (map[string]string, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if n.err != nil {
-		return n.err
+		return nil, n.err
 	}
 	n.calls = append(n.calls, notifyCall{r: r, late: late})
-	return nil
+	return map[string]string{"topic-a": "ntfy-id-" + r.ID}, nil
 }
 
 func (n *notifyRecorder) recorded() []notifyCall {
@@ -86,6 +86,10 @@ func TestTick_FiresOnlyDueReminders(t *testing.T) {
 
 	if archive[0].FiredAt.IsZero() {
 		t.Error("archived reminder has zero FiredAt, want the tick's timestamp")
+	}
+
+	if got := archive[0].NtfyMessageIDs["topic-a"]; got != "ntfy-id-due-1" {
+		t.Errorf("archived NtfyMessageIDs[topic-a] = %q, want %q (ids returned by notify must reach the archived reminder)", got, "ntfy-id-due-1")
 	}
 }
 

@@ -111,7 +111,8 @@ func TestArchiveReminder(t *testing.T) {
 	}
 
 	firedAt := time.Now()
-	if err := s.ArchiveReminder(r, firedAt); err != nil {
+	ntfyIDs := map[string]string{"topic-a": "ntfy-id-1"}
+	if err := s.ArchiveReminder(r, firedAt, ntfyIDs); err != nil {
 		t.Fatalf("ArchiveReminder() error = %v", err)
 	}
 
@@ -134,6 +135,10 @@ func TestArchiveReminder(t *testing.T) {
 
 	if !archive[0].FiredAt.Equal(firedAt) {
 		t.Errorf("archived FiredAt = %v, want %v", archive[0].FiredAt, firedAt)
+	}
+
+	if got := archive[0].NtfyMessageIDs["topic-a"]; got != "ntfy-id-1" {
+		t.Errorf("archived NtfyMessageIDs[topic-a] = %q, want %q", got, "ntfy-id-1")
 	}
 }
 

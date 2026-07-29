@@ -96,7 +96,7 @@ func (s *Store) ListPendingReminders() []reminder.Reminder {
 	return result
 }
 
-func (s *Store) ArchiveReminder(r reminder.Reminder, firedAt time.Time) error {
+func (s *Store) ArchiveReminder(r reminder.Reminder, firedAt time.Time, ntfyMessageIDs map[string]string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -113,8 +113,9 @@ func (s *Store) ArchiveReminder(r reminder.Reminder, firedAt time.Time) error {
 
 	// append to archive
 	archived := reminder.ArchivedReminder{
-		Reminder: r,
-		FiredAt:  firedAt,
+		Reminder:       r,
+		FiredAt:        firedAt,
+		NtfyMessageIDs: ntfyMessageIDs,
 	}
 	return s.appendToArchive(archived)
 }
