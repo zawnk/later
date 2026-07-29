@@ -274,7 +274,7 @@ func (c *Client) Run(ctx context.Context) {
 			return
 		}
 
-		slog.Error("ntfy subscription dropped, reconnecting", "backoff", c.reconnectWait, "topics", combined, "err", err)
+		slog.Error("ntfy subscription dropped, reconnecting", "backoff", c.reconnectWait.String(), "topics", combined, "err", err)
 
 		select {
 		case <-ctx.Done():
