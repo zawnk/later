@@ -97,10 +97,10 @@ func New(cfg *config.Config, actionSecret []byte, svc ReminderService) *Client {
 	}
 }
 
-func (c *Client) Send(ctx context.Context, r reminder.Reminder, late bool) error {
+func (c *Client) Send(ctx context.Context, r reminder.Reminder, late bool) (map[string]string, error) {
 	topics := r.OutboundTopics
 	if len(topics) == 0 {
-		return fmt.Errorf("reminder %s has no outbound topics", r.ID)
+		return nil, fmt.Errorf("reminder %s has no outbound topics", r.ID)
 	}
 
 	text := r.Text
@@ -113,6 +113,7 @@ func (c *Client) Send(ctx context.Context, r reminder.Reminder, late bool) error
 		slog.Error("failed to build action buttons, sending notification without them", "id", r.ID, "err", err)
 	}
 
+	ids := make(map[string]string, len(topics))
 	for _, topic := range topics {
 		mods := ntfyMessageModifications{
 			title:    "Reminder",
@@ -122,11 +123,13 @@ func (c *Client) Send(ctx context.Context, r reminder.Reminder, late bool) error
 			click:    r.Click,
 			actions:  actions,
 		}
-		if err := c.sendToTopic(ctx, text, topic, mods); err != nil {
-			return fmt.Errorf("failed to send to topic %s: %w", topic, err)
+		id, err := c.sendToTopic(ctx, text, topic, mods)
+		if err != nil {
+			return nil, fmt.Errorf("failed to send to topic %s: %w", topic, err)
 		}
+		ids[topic] = id
 	}
-	return nil
+	return ids, nil
 }
 
 // buildActions mints one postpone token for reminderID (the token only
@@ -156,7 +159,7 @@ func (c *Client) buildActions(reminderID string) (string, error) {
 	return strings.Join(actions, "; "), nil
 }
 
-func (c *Client) sendToTopic(ctx context.Context, text, topic string, mods ...ntfyMessageModifications) error {
+func (c *Client) sendToTopic(ctx context.Context, text, topic string, mods ...ntfyMessageModifications) (string, error) {
 	var mod ntfyMessageModifications
 	if len(mods) > 0 {
 		mod = mods[0]
@@ -170,7 +173,7 @@ func (c *Client) sendToTopic(ctx context.Context, text, topic string, mods ...nt
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(text))
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	tags := mod.tags
@@ -204,7 +207,7 @@ func (c *Client) sendToTopic(ctx context.Context, text, topic string, mods ...nt
 
 	resp, err := c.publishClient.Do(req)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	defer func() {
@@ -214,11 +217,22 @@ func (c *Client) sendToTopic(ctx context.Context, text, topic string, mods ...nt
 
 	if resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("ntfy returned status %d: %s", resp.StatusCode, body)
+		return "", fmt.Errorf("ntfy returned status %d: %s", resp.StatusCode, body)
 	}
 
-	slog.Info("notification sent", "topic", topic)
-	return nil
+	var published struct {
+		ID string `json:"id"`
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil {
+		return "", fmt.Errorf("failed to read ntfy publish response for topic %s: %w", topic, err)
+	}
+	if err := json.Unmarshal(body, &published); err != nil || published.ID == "" {
+		return "", fmt.Errorf("ntfy publish to topic %s returned no message id (body: %s)", topic, body)
+	}
+
+	slog.Info("notification sent", "topic", topic, "id", published.ID)
+	return published.ID, nil
 }
 
 func (c *Client) Run(ctx context.Context) {
@@ -445,5 +459,6 @@ func (c *Client) sendError(ctx context.Context, topic string, createErr error) e
 }
 
 func (c *Client) sendSystem(ctx context.Context, text, topic string) error {
-	return c.sendToTopic(ctx, "[later] "+text, topic)
+	_, err := c.sendToTopic(ctx, "[later] "+text, topic)
+	return err
 }
