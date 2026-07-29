@@ -3,6 +3,7 @@ package ntfy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -92,8 +93,11 @@ func recordingServer(t *testing.T) (*httptest.Server, func() []recordedRequest) 
 			header: r.Header.Clone(),
 			body:   string(body),
 		})
+		id := fmt.Sprintf("fake-id-%d", len(reqs))
 		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintf(w, `{"id":%q}`, id)
 	}))
 	t.Cleanup(srv.Close)
 
@@ -161,7 +165,7 @@ func TestSend(t *testing.T) {
 		CreatedAt:      time.Now(),
 	}
 
-	if err := c.Send(context.Background(), r, false); err != nil {
+	if _, err := c.Send(context.Background(), r, false); err != nil {
 		t.Fatalf("Send() error = %v", err)
 	}
 
@@ -201,7 +205,7 @@ func TestSend_Late(t *testing.T) {
 	c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
 
 	r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}, CreatedAt: time.Now()}
-	if err := c.Send(context.Background(), r, true); err != nil {
+	if _, err := c.Send(context.Background(), r, true); err != nil {
 		t.Fatalf("Send() error = %v", err)
 	}
 
@@ -225,7 +229,7 @@ func TestSend_AgeLine(t *testing.T) {
 		c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
 
 		r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}, CreatedAt: time.Now().Add(-30 * time.Minute)}
-		if err := c.Send(context.Background(), r, false); err != nil {
+		if _, err := c.Send(context.Background(), r, false); err != nil {
 			t.Fatalf("Send() error = %v", err)
 		}
 
@@ -239,7 +243,7 @@ func TestSend_AgeLine(t *testing.T) {
 		c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
 
 		r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}, CreatedAt: time.Now().Add(-3 * time.Hour)}
-		if err := c.Send(context.Background(), r, false); err != nil {
+		if _, err := c.Send(context.Background(), r, false); err != nil {
 			t.Fatalf("Send() error = %v", err)
 		}
 
@@ -253,7 +257,7 @@ func TestSend_AgeLine(t *testing.T) {
 		c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
 
 		r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}, CreatedAt: time.Now().Add(-3 * time.Hour)}
-		if err := c.Send(context.Background(), r, true); err != nil {
+		if _, err := c.Send(context.Background(), r, true); err != nil {
 			t.Fatalf("Send() error = %v", err)
 		}
 
@@ -269,7 +273,7 @@ func TestSend_ActionButtons(t *testing.T) {
 		c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
 
 		r := reminder.Reminder{ID: "abc123", Text: "buy milk", OutboundTopics: []string{"topic-a"}, CreatedAt: time.Now()}
-		if err := c.Send(context.Background(), r, false); err != nil {
+		if _, err := c.Send(context.Background(), r, false); err != nil {
 			t.Fatalf("Send() error = %v", err)
 		}
 
@@ -285,7 +289,7 @@ func TestSend_ActionButtons(t *testing.T) {
 		c := New(cfg, testActionSecret, &stubReminderService{})
 
 		r := reminder.Reminder{ID: "abc123", Text: "buy milk", OutboundTopics: []string{"topic-a"}, CreatedAt: time.Now()}
-		if err := c.Send(context.Background(), r, false); err != nil {
+		if _, err := c.Send(context.Background(), r, false); err != nil {
 			t.Fatalf("Send() error = %v", err)
 		}
 
@@ -327,7 +331,7 @@ func TestSend_ActionButtons(t *testing.T) {
 		c := New(cfg, testActionSecret, &stubReminderService{})
 
 		r := reminder.Reminder{ID: "abc123", Text: "buy milk", OutboundTopics: []string{"topic-a"}, CreatedAt: time.Now()}
-		if err := c.Send(context.Background(), r, false); err != nil {
+		if _, err := c.Send(context.Background(), r, false); err != nil {
 			t.Fatalf("Send() error = %v", err)
 		}
 
@@ -357,7 +361,7 @@ func TestSend_Tags(t *testing.T) {
 			c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
 
 			r := reminder.Reminder{Text: "buy cake", OutboundTopics: []string{"topic-a"}, Tags: tt.tags}
-			if err := c.Send(context.Background(), r, tt.late); err != nil {
+			if _, err := c.Send(context.Background(), r, tt.late); err != nil {
 				t.Fatalf("Send() error = %v", err)
 			}
 
@@ -394,7 +398,7 @@ func TestSend_Priority(t *testing.T) {
 			c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
 
 			r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}, Priority: tt.priority}
-			if err := c.Send(context.Background(), r, tt.late); err != nil {
+			if _, err := c.Send(context.Background(), r, tt.late); err != nil {
 				t.Fatalf("Send() error = %v", err)
 			}
 
@@ -426,7 +430,7 @@ func TestSend_Click(t *testing.T) {
 			c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
 
 			r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}, Click: tt.click}
-			if err := c.Send(context.Background(), r, false); err != nil {
+			if _, err := c.Send(context.Background(), r, false); err != nil {
 				t.Fatalf("Send() error = %v", err)
 			}
 
@@ -447,7 +451,8 @@ func TestSend_MultipleTopics(t *testing.T) {
 	c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
 
 	r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a", "topic-b"}}
-	if err := c.Send(context.Background(), r, false); err != nil {
+	ids, err := c.Send(context.Background(), r, false)
+	if err != nil {
 		t.Fatalf("Send() error = %v", err)
 	}
 
@@ -459,6 +464,14 @@ func TestSend_MultipleTopics(t *testing.T) {
 	if reqs[0].path != "/topic-a" || reqs[1].path != "/topic-b" {
 		t.Errorf("request paths = %q, %q; want /topic-a then /topic-b", reqs[0].path, reqs[1].path)
 	}
+
+	if len(ids) != 2 {
+		t.Fatalf("Send() returned %d ids, want 2 (one per topic): %+v", len(ids), ids)
+	}
+
+	if ids["topic-a"] != "fake-id-1" || ids["topic-b"] != "fake-id-2" {
+		t.Errorf("Send() ids = %+v, want topic-a -> fake-id-1 and topic-b -> fake-id-2 (each topic must keep its own id, not the last one written)", ids)
+	}
 }
 
 func TestSend_NoTopicsIsAnError(t *testing.T) {
@@ -466,7 +479,7 @@ func TestSend_NoTopicsIsAnError(t *testing.T) {
 	c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
 
 	r := reminder.Reminder{ID: "abc123", Text: "buy milk"}
-	err := c.Send(context.Background(), r, false)
+	_, err := c.Send(context.Background(), r, false)
 	if err == nil {
 		t.Fatal("Send() error = nil, want an error for a reminder without topics")
 	}
@@ -490,7 +503,7 @@ func TestSend_ServerError(t *testing.T) {
 	c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
 	r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}}
 
-	err := c.Send(context.Background(), r, false)
+	_, err := c.Send(context.Background(), r, false)
 	if err == nil {
 		t.Fatal("Send() error = nil, want an error for a 403 response")
 	}
@@ -505,6 +518,40 @@ func TestSend_ServerError(t *testing.T) {
 
 	if !strings.Contains(err.Error(), "topic-a") {
 		t.Errorf("Send() error = %q, want it to name the failing topic", err)
+	}
+}
+
+func TestSend_MissingIDIsAnError(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"empty body", ""},
+		{"valid JSON but no id field", `{"time":1673542291,"event":"message"}`},
+		{"id present but empty", `{"id":""}`},
+		{"not JSON at all", "not json"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			t.Cleanup(srv.Close)
+
+			c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
+			r := reminder.Reminder{Text: "buy milk", OutboundTopics: []string{"topic-a"}}
+
+			ids, err := c.Send(context.Background(), r, false)
+			if err == nil {
+				t.Fatalf("Send() error = nil, ids = %+v, want an error for a 2xx response with no usable message id", ids)
+			}
+
+			if !strings.Contains(err.Error(), "topic-a") {
+				t.Errorf("Send() error = %q, want it to name the failing topic", err)
+			}
+		})
 	}
 }
 

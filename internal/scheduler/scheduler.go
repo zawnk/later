@@ -11,11 +11,11 @@ import (
 
 type Scheduler struct {
 	store     *store.Store
-	notify    func(ctx context.Context, r reminder.Reminder, late bool) error
+	notify    func(ctx context.Context, r reminder.Reminder, late bool) (map[string]string, error)
 	startedAt time.Time
 }
 
-func New(s *store.Store, notify func(ctx context.Context, r reminder.Reminder, late bool) error) *Scheduler {
+func New(s *store.Store, notify func(ctx context.Context, r reminder.Reminder, late bool) (map[string]string, error)) *Scheduler {
 	return &Scheduler{
 		store:     s,
 		notify:    notify,
@@ -46,11 +46,12 @@ func (s *Scheduler) tick(ctx context.Context) {
 	for _, r := range s.store.ListPendingReminders() {
 		if !r.DueAt.After(now) {
 			late := r.DueAt.Before(s.startedAt)
-			if err := s.notify(ctx, r, late); err != nil {
+			ntfyIDs, err := s.notify(ctx, r, late)
+			if err != nil {
 				slog.Error("failed to send notification", "id", r.ID, "err", err)
 				continue
 			}
-			if err := s.store.ArchiveReminder(r, now); err != nil {
+			if err := s.store.ArchiveReminder(r, now, ntfyIDs); err != nil {
 				slog.Error("failed to archive reminder", "id", r.ID, "err", err)
 			}
 		}
