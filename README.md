@@ -51,8 +51,9 @@ If you're already running ntfy, that's the only other piece you need - just plai
   notification gets a `DELAYED:` prefix, a  warning tag, and a priority bump -
   so it doesn't get lost in the noise.
 - **Flexible routing** - each access token can be scoped to its own set
-  of ntfy topics, with a sensible default so you don't have to specify
-  one every time.
+  of ntfy topics. Skip `default_outbound` and reminders with no explicit
+  topic fan out to all of them; set it to route unscoped reminders to
+  just one instead.
 - **Cancel or postpone anytime** - reference a reminder by id, or just
   say `last` in the CLI for the one you created or postponed most
   recently, no need to go copy an id first.
@@ -127,6 +128,9 @@ auth_tokens:
 
 `./data` on the host holds both `config.yaml` and the state files
 (`pending.json`, `archive.json`) - one directory, everything in it.
+
+See [`data/config.yaml.example`](data/config.yaml.example) for every
+option, including optional ones like `default_outbound`.
 
 **3. Run it:** `docker compose up -d`
 
