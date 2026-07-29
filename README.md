@@ -48,8 +48,8 @@ If you're already running ntfy, that's the only other piece you need - just plai
 - **Real push notifications** - tags, priority, and a tappable link if you
   want one, same as any other ntfy notification. If a reminder's been
   sitting a while before it fires (say the server was briefly down), the
-  notification gets a `DELAYED:` prefix, a  warning tag, and a priority bump
-  - so it doesn't get lost in the noise.
+  notification gets a `DELAYED:` prefix, a  warning tag, and a priority bump -
+  so it doesn't get lost in the noise.
 - **Flexible routing** - each access token can be scoped to its own set
   of ntfy topics, with a sensible default so you don't have to specify
   one every time.
