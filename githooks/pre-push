@@ -1,0 +1,4 @@
+#!/bin/sh
+# Runs golangci-lint before push. Install with: make hooks-install
+set -e
+exec make lint

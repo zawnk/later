@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/alecthomas/kong"
 	"github.com/zawnk/later/internal/reminder"
@@ -154,7 +155,8 @@ func (p *ParseCmd) Run(a *app) error {
 }
 
 type ListCmd struct {
-	By string `help:"Sort order: soonest due first, or creation order." enum:"due,create" default:"due"`
+	By      string `help:"Sort order: soonest due first, or creation order." enum:"due,create" default:"due"`
+	Verbose bool   `short:"v" help:"Group by ETA and show priority/tags/topics."`
 }
 
 func (l *ListCmd) Run(a *app) error {
@@ -177,9 +179,7 @@ func (l *ListCmd) Run(a *app) error {
 		fmt.Fprintln(a.out, "no pending reminders")
 		return nil
 	}
-	for _, r := range reminders {
-		fmt.Fprintf(a.out, "%s  due %s  %s\n", r.ID, formatTime(r.DueAt), r.Text)
-	}
+	printPendingEntries(a.out, reminders, l.By, l.Verbose)
 	return nil
 }
 
@@ -238,11 +238,213 @@ func printArchiveEntry(w io.Writer, r *reminder.ArchivedReminder, verbose bool) 
 	}
 }
 
+// printPendingEntries prints pending reminders, optionally (verbose) grouped
+// into ETA buckets with aligned priority/tags/topics columns. by selects the
+// bucketing dimension: "due" (default) buckets by DueAt, "create" buckets by
+// CreatedAt. Item order within each bucket is preserved from the input.
+func printPendingEntries(w io.Writer, reminders []reminder.Reminder, by string, verbose bool) {
+	if !verbose {
+		for _, r := range reminders {
+			fmt.Fprintf(w, "%s  due %s  %s\n", r.ID, formatTime(r.DueAt), r.Text)
+		}
+		return
+	}
+
+	var buckets []pendingBucket
+	if by == "create" {
+		buckets = bucketByCreate(reminders)
+	} else {
+		buckets = bucketByDue(reminders)
+	}
+
+	showPriority, showTags, showTopics := false, false, false
+	for _, r := range reminders {
+		showPriority = showPriority || r.Priority != ""
+		showTags = showTags || len(r.Tags) > 0
+		showTopics = showTopics || len(r.OutboundTopics) > 0
+	}
+
+	idWidth, dueWidth, priorityWidth, tagsWidth, topicsWidth := 0, 0, 0, 0, 0
+	rowsByBucket := make([][]pendingRow, len(buckets))
+	for bi, b := range buckets {
+		rows := make([]pendingRow, len(b.items))
+		for i, r := range b.items {
+			row := pendingRow{id: r.ID, due: dueCell(r), text: r.Text}
+			if showPriority {
+				row.priority = priorityCell(r)
+			}
+			if showTags {
+				row.tags = tagsCell(r)
+			}
+			if showTopics {
+				row.topics = topicsCell(r)
+			}
+			rows[i] = row
+
+			idWidth = max(idWidth, utf8.RuneCountInString(row.id))
+			dueWidth = max(dueWidth, utf8.RuneCountInString(row.due))
+			priorityWidth = max(priorityWidth, utf8.RuneCountInString(row.priority))
+			tagsWidth = max(tagsWidth, utf8.RuneCountInString(row.tags))
+			topicsWidth = max(topicsWidth, utf8.RuneCountInString(row.topics))
+		}
+		rowsByBucket[bi] = rows
+	}
+
+	for bi, b := range buckets {
+		if bi > 0 {
+			fmt.Fprintln(w)
+		}
+		fmt.Fprintln(w, b.label)
+		for _, row := range rowsByBucket[bi] {
+			fmt.Fprintf(w, "  %-*s  %-*s", idWidth, row.id, dueWidth, row.due)
+			if showPriority {
+				fmt.Fprintf(w, "  %-*s", priorityWidth, row.priority)
+			}
+			if showTags {
+				fmt.Fprintf(w, "  %-*s", tagsWidth, row.tags)
+			}
+			if showTopics {
+				fmt.Fprintf(w, "  %-*s", topicsWidth, row.topics)
+			}
+			fmt.Fprintf(w, "  %s\n", row.text)
+		}
+	}
+}
+
+type pendingBucket struct {
+	label string
+	items []reminder.Reminder
+}
+
+type pendingRow struct {
+	id, due, priority, tags, topics, text string
+}
+
+// dayStart truncates t to local midnight, for calendar-day bucket math.
+func dayStart(t time.Time) time.Time {
+	t = t.Local()
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+}
+
+// dueProximityLabel classifies r.DueAt as Overdue/Today/Tomorrow/Later
+// relative to now, independent of which dimension the surrounding output is
+// grouped by. This is used both for --by=due bucketing and, unconditionally,
+// to decide the due column's rendering (dueCell) -- the due column always
+// shows DueAt (decision 9), so its near/far classification must be based on
+// DueAt itself, not on whatever bucket label the row happens to be grouped
+// under when --by=create.
+func dueProximityLabel(r reminder.Reminder, now time.Time) string {
+	if r.DueAt.Before(now) {
+		return "Overdue"
+	}
+	switch days := int(dayStart(r.DueAt).Sub(dayStart(now)).Hours() / 24); days {
+	case 0:
+		return "Today"
+	case 1:
+		return "Tomorrow"
+	default:
+		return "Later"
+	}
+}
+
+// bucketByDue partitions reminders into Overdue/Today/Tomorrow/Later buckets
+// by DueAt, preserving input order within each bucket.
+func bucketByDue(reminders []reminder.Reminder) []pendingBucket {
+	now := time.Now()
+
+	grouped := make(map[string][]reminder.Reminder, 4)
+	for _, r := range reminders {
+		label := dueProximityLabel(r, now)
+		grouped[label] = append(grouped[label], r)
+	}
+	return orderedBuckets([]string{"Overdue", "Today", "Tomorrow", "Later"}, grouped)
+}
+
+// bucketByCreate partitions reminders into Today/Yesterday/Last week/Last
+// month/Earlier buckets by CreatedAt, preserving input order within each
+// bucket.
+func bucketByCreate(reminders []reminder.Reminder) []pendingBucket {
+	todayStart := dayStart(time.Now())
+
+	grouped := make(map[string][]reminder.Reminder, 5)
+	for _, r := range reminders {
+		var label string
+		switch days := int(todayStart.Sub(dayStart(r.CreatedAt)).Hours() / 24); {
+		case days <= 0:
+			label = "Today"
+		case days == 1:
+			label = "Yesterday"
+		case days <= 7:
+			label = "Last week"
+		case days <= 30:
+			label = "Last month"
+		default:
+			label = "Earlier"
+		}
+		grouped[label] = append(grouped[label], r)
+	}
+	return orderedBuckets([]string{"Today", "Yesterday", "Last week", "Last month", "Earlier"}, grouped)
+}
+
+// orderedBuckets returns non-empty buckets from grouped in the given label
+// order, omitting any label with no entries.
+func orderedBuckets(order []string, grouped map[string][]reminder.Reminder) []pendingBucket {
+	buckets := make([]pendingBucket, 0, len(order))
+	for _, label := range order {
+		if items := grouped[label]; len(items) > 0 {
+			buckets = append(buckets, pendingBucket{label: label, items: items})
+		}
+	}
+	return buckets
+}
+
+// dueCell renders the due column. Today/Tomorrow are narrow, single-day-span
+// buckets where a bare "weekday time" reading (no date) is still
+// unambiguous; Overdue/Later are open-ended, so they use the full
+// formatTime instead, since a weekday name alone doesn't say which week it
+// falls in. This is always based on r.DueAt's own proximity to now, never on
+// the row's grouping bucket -- when --by=create, the row's grouping label
+// (e.g. "Yesterday") describes CreatedAt and says nothing about how near or
+// far DueAt is.
+func dueCell(r reminder.Reminder) string {
+	switch dueProximityLabel(r, time.Now()) {
+	case "Today", "Tomorrow":
+		return r.DueAt.Local().Format("Mon 15:04")
+	default:
+		return formatTime(r.DueAt)
+	}
+}
+
+func priorityCell(r reminder.Reminder) string {
+	if r.Priority == "" {
+		return "-"
+	}
+	return r.Priority
+}
+
+func tagsCell(r reminder.Reminder) string {
+	if len(r.Tags) == 0 {
+		return "-"
+	}
+	parts := make([]string, len(r.Tags))
+	for i, t := range r.Tags {
+		parts[i] = "#" + t
+	}
+	return strings.Join(parts, " ")
+}
+
+func topicsCell(r reminder.Reminder) string {
+	if len(r.OutboundTopics) == 0 {
+		return "-"
+	}
+	return "→" + strings.Join(r.OutboundTopics, ",")
+}
+
 type SearchCmd struct {
 	Text    []string `arg:"" help:"Search query, no quotes needed. Matched as a case-insensitive substring against reminder text."`
 	Pending bool     `help:"Search pending reminders (the default)." xor:"bucket"`
 	Archive bool     `help:"Search archived reminders instead." xor:"bucket"`
-	Verbose bool     `short:"v" help:"With --archive, also show each outbound topic and its ntfy message id."`
+	Verbose bool     `short:"v" help:"With --archive, also show each outbound topic and its ntfy message id. Otherwise, group pending results by ETA and show priority/tags/topics."`
 }
 
 func (c *SearchCmd) Run(a *app) error {
@@ -287,9 +489,7 @@ func (c *SearchCmd) Run(a *app) error {
 		fmt.Fprintln(a.out, "no pending reminders match")
 		return nil
 	}
-	for _, r := range reminders {
-		fmt.Fprintf(a.out, "%s  due %s  %s\n", r.ID, formatTime(r.DueAt), r.Text)
-	}
+	printPendingEntries(a.out, reminders, "due", c.Verbose)
 	return nil
 }
 

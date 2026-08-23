@@ -316,6 +316,281 @@ func TestListSorting(t *testing.T) {
 	}
 }
 
+func TestListVerboseGroupsByDueETA(t *testing.T) {
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+
+	reminders := []reminder.Reminder{
+		{ID: "overdue1", Text: "overdue task", DueAt: today.Add(-1 * time.Hour)},
+		{ID: "today1", Text: "today task", DueAt: today.Add(23*time.Hour + 59*time.Minute)},
+		{ID: "tomorrow1", Text: "tomorrow task", DueAt: today.Add(25 * time.Hour)},
+		{ID: "later1", Text: "later task", DueAt: today.Add(10 * 24 * time.Hour)},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(reminders)
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "list", "--verbose"); err != nil {
+		t.Fatalf(`runCLI("list --verbose") error = %v`, err)
+	}
+	got := out.String()
+
+	wantOrder := []string{"Overdue", "overdue1", "Today", "today1", "Tomorrow", "tomorrow1", "Later", "later1"}
+	lastIdx := -1
+	for _, want := range wantOrder {
+		idx := strings.Index(got, want)
+		if idx == -1 {
+			t.Fatalf("list --verbose output = %q, want to find %q", got, want)
+		}
+		if idx < lastIdx {
+			t.Errorf("list --verbose output = %q, want %q to appear after the previous entries in bucket order", got, want)
+		}
+		lastIdx = idx
+	}
+}
+
+func TestListVerboseOmitsEmptyBuckets(t *testing.T) {
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+
+	reminders := []reminder.Reminder{
+		{ID: "today1", Text: "today task", DueAt: today.Add(23*time.Hour + 59*time.Minute)},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(reminders)
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "list", "--verbose"); err != nil {
+		t.Fatalf(`runCLI("list --verbose") error = %v`, err)
+	}
+	got := out.String()
+
+	if !strings.Contains(got, "Today") {
+		t.Errorf("list --verbose output = %q, want a Today bucket header", got)
+	}
+	for _, absent := range []string{"Overdue", "Tomorrow", "Later"} {
+		if strings.Contains(got, absent) {
+			t.Errorf("list --verbose output = %q, want no %q header since that bucket is empty", got, absent)
+		}
+	}
+}
+
+func TestListVerboseGroupsByCreateETA(t *testing.T) {
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+
+	reminders := []reminder.Reminder{
+		{ID: "today1", Text: "created today", CreatedAt: now},
+		{ID: "yesterday1", Text: "created yesterday", CreatedAt: today.Add(-12 * time.Hour)},
+		{ID: "lastweek1", Text: "created last week", CreatedAt: today.Add(-3*24*time.Hour - 12*time.Hour)},
+		{ID: "lastmonth1", Text: "created last month", CreatedAt: today.Add(-14*24*time.Hour - 12*time.Hour)},
+		{ID: "earlier1", Text: "created earlier", CreatedAt: today.Add(-39*24*time.Hour - 12*time.Hour)},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(reminders)
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "list", "--by=create", "--verbose"); err != nil {
+		t.Fatalf(`runCLI("list --by=create --verbose") error = %v`, err)
+	}
+	got := out.String()
+
+	wantOrder := []string{
+		"Today", "today1",
+		"Yesterday", "yesterday1",
+		"Last week", "lastweek1",
+		"Last month", "lastmonth1",
+		"Earlier", "earlier1",
+	}
+	lastIdx := -1
+	for _, want := range wantOrder {
+		idx := strings.Index(got, want)
+		if idx == -1 {
+			t.Fatalf("list --by=create --verbose output = %q, want to find %q", got, want)
+		}
+		if idx < lastIdx {
+			t.Errorf("list --by=create --verbose output = %q, want %q to appear after the previous entries in bucket order", got, want)
+		}
+		lastIdx = idx
+	}
+}
+
+func TestListVerboseCreateGroupingUsesDueOwnProximityForFormat(t *testing.T) {
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+
+	reminders := []reminder.Reminder{
+		{
+			ID:        "faraway1",
+			Text:      "renewal three months out",
+			CreatedAt: today.Add(-12 * time.Hour), // lands in the "Yesterday" create bucket
+			DueAt:     today.Add(90 * 24 * time.Hour),
+		},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(reminders)
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "list", "--by=create", "--verbose"); err != nil {
+		t.Fatalf(`runCLI("list --by=create --verbose") error = %v`, err)
+	}
+	got := out.String()
+
+	if !strings.Contains(got, "Yesterday") {
+		t.Fatalf("output = %q, want the row grouped under the Yesterday (create) bucket", got)
+	}
+
+	wantDue := formatTime(reminders[0].DueAt)
+	if !strings.Contains(got, wantDue) {
+		t.Errorf("output = %q, want the due column to show the full date (%q) since the due date is 3 months out, regardless of which create-bucket the row is grouped under", got, wantDue)
+	}
+}
+
+func TestListVerboseShowsPriorityTagsTopics(t *testing.T) {
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+
+	reminders := []reminder.Reminder{
+		{
+			ID:             "abc123",
+			Text:           "renew certificate",
+			DueAt:          today.Add(23*time.Hour + 59*time.Minute),
+			Priority:       "urgent",
+			Tags:           []string{"work", "cert"},
+			OutboundTopics: []string{"ops-alerts", "backup-topic"},
+		},
+		{
+			ID:    "def456",
+			Text:  "pick up dry cleaning",
+			DueAt: today.Add(23*time.Hour + 58*time.Minute),
+		},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(reminders)
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "list", "--verbose"); err != nil {
+		t.Fatalf(`runCLI("list --verbose") error = %v`, err)
+	}
+	got := out.String()
+
+	if !strings.Contains(got, "urgent") || !strings.Contains(got, "#work #cert") || !strings.Contains(got, "→ops-alerts,backup-topic") {
+		t.Errorf("list --verbose output = %q, want priority/tags/topics rendered for abc123", got)
+	}
+
+	for _, line := range strings.Split(got, "\n") {
+		if strings.Contains(line, "def456") {
+			if !strings.Contains(line, "-") {
+				t.Errorf("list --verbose line = %q, want empty priority/tags/topics cells rendered as -", line)
+			}
+		}
+	}
+}
+
+func TestListVerboseOmitsAllEmptyColumns(t *testing.T) {
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+
+	reminders := []reminder.Reminder{
+		{ID: "abc123", Text: "renew certificate", DueAt: today.Add(23*time.Hour + 59*time.Minute)},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(reminders)
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "list", "--verbose"); err != nil {
+		t.Fatalf(`runCLI("list --verbose") error = %v`, err)
+	}
+	got := out.String()
+
+	if strings.Contains(got, "-") {
+		t.Errorf("list --verbose output = %q, want no dash placeholders when priority/tags/topics are entirely absent", got)
+	}
+}
+
+func TestListVerboseIsNoOpUnderJSON(t *testing.T) {
+	now := time.Now()
+	reminders := []reminder.Reminder{
+		{ID: "abc123", Text: "renew certificate", DueAt: now.Add(1 * time.Hour), Priority: "urgent"},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(reminders)
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "--json", "list", "--verbose"); err != nil {
+		t.Fatalf(`runCLI("--json list --verbose") error = %v`, err)
+	}
+
+	var got []reminder.Reminder
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf(`"--json list --verbose" output is not valid JSON: %v; output: %q`, err, out.String())
+	}
+	if len(got) != 1 || got[0].Priority != "urgent" {
+		t.Errorf(`"--json list --verbose" decoded to %+v, want the full reminder unaffected by --verbose`, got)
+	}
+}
+
+func TestSearchPendingVerbose(t *testing.T) {
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+
+	reminders := []reminder.Reminder{
+		{
+			ID:       "abc123",
+			Text:     "renew certificate",
+			DueAt:    today.Add(23*time.Hour + 59*time.Minute),
+			Priority: "urgent",
+		},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(reminders)
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "search", "certificate", "--verbose"); err != nil {
+		t.Fatalf(`runCLI("search certificate --verbose") error = %v`, err)
+	}
+	got := out.String()
+
+	if !strings.Contains(got, "Today") {
+		t.Errorf("search --verbose output = %q, want a Today bucket header", got)
+	}
+	if !strings.Contains(got, "urgent") {
+		t.Errorf("search --verbose output = %q, want the priority column rendered", got)
+	}
+}
+
 func TestNextEmptyIsNotAnError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no pending reminders", http.StatusNotFound)

@@ -74,6 +74,10 @@ fuzz: ## run the parser fuzz target for FUZZTIME (default 30s; override: make fu
 tidy: ## go mod tidy
 	$(GO) mod tidy
 
+.PHONY: hooks-install
+hooks-install: ## point git at githooks/ so pre-push runs lint locally
+	git config core.hooksPath githooks
+
 .PHONY: run
 run: ## run the server against ./config.yaml
 	$(GO) run ./cmd/later-server -config config.yaml
