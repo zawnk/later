@@ -1,6 +1,19 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:recommended"
+    "config:recommended",
+    "docker:pinDigests",
+    "helpers:pinGitHubActionDigests",
+    "abandonments:recommended",
+    ":configMigration"
+  ],
+  "minimumReleaseAge": "3 days",
+  "packageRules": [
+    {
+      "description": "gcr.io provides no release timestamps; don't hold digest updates forever",
+      "matchDatasources": ["docker"],
+      "matchUpdateTypes": ["digest"],
+      "minimumReleaseAge": null
+    }
   ]
 }
