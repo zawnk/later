@@ -1,6 +1,8 @@
 # later
 
 [![CI](https://github.com/zawnk/later/actions/workflows/ci.yml/badge.svg)](https://github.com/zawnk/later/actions/workflows/ci.yml)
+[![later release](https://img.shields.io/github/v/tag/zawnk/later?filter=later%2Fv*&label=later&color=blue)](https://github.com/zawnk/later/releases?q=%22later%2Fv%22)
+[![later-server release](https://img.shields.io/github/v/tag/zawnk/later?filter=later-server%2Fv*&label=later-server&color=blue)](https://github.com/zawnk/later/releases?q=%22later-server%2Fv%22)
 [![GHCR](https://img.shields.io/badge/ghcr.io-later--server-blue?logo=docker)](https://github.com/zawnk/later/pkgs/container/later-server)
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
 
