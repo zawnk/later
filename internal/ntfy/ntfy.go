@@ -132,31 +132,90 @@ func (c *Client) Send(ctx context.Context, r reminder.Reminder, late bool) (map[
 	return ids, nil
 }
 
-// buildActions mints one postpone token for reminderID (the token only
-// grants "postpone this reminder" and returns the ntfy Actions header
-// value for the "Snooze 1h"/"Tomorrow" buttons, or "" if base_url isn't
-// configured (the feature just stays off).
+// buildActions mints a postpone token (shared by the "Snooze 1h"/"Tomorrow"
+// buttons) and a separate clear-scoped token (for "Clear"), and returns the
+// ntfy Actions header value for all three, or "" if base_url isn't
+// configured (the feature just stays off). Three is ntfy's own max action
+// count.
 func (c *Client) buildActions(reminderID string) (string, error) {
 	if c.cfg.Server.BaseURL == "" {
 		return "", nil
 	}
 
-	token, err := actiontoken.Mint(c.actionSecret, reminderID, "postpone")
+	base := strings.TrimRight(config.NormalizedBaseURL(c.cfg.Server.BaseURL), "/") + "/reminders/" + reminderID
+
+	postponeToken, err := actiontoken.Mint(c.actionSecret, reminderID, "postpone")
 	if err != nil {
 		return "", err
 	}
 
-	base := strings.TrimRight(config.NormalizedBaseURL(c.cfg.Server.BaseURL), "/") + "/reminders/" + reminderID + "/postpone"
-
 	labels := []string{"Snooze 1h", "Tomorrow"}
 	durations := []string{"in 1h", "tomorrow morning"}
-	actions := make([]string, len(labels))
+	actions := make([]string, 0, 3)
 	for i, label := range labels {
-		callback := base + "?duration=" + url.QueryEscape(durations[i])
-		actions[i] = fmt.Sprintf("http, %s, %s, method=POST, headers.Authorization=Bearer %s, clear=true", label, callback, token)
+		callback := base + "/postpone?duration=" + url.QueryEscape(durations[i])
+		actions = append(actions, fmt.Sprintf("http, %s, %s, method=POST, headers.Authorization=Bearer %s, clear=true", label, callback, postponeToken))
 	}
 
+	clearToken, err := actiontoken.Mint(c.actionSecret, reminderID, "clear")
+	if err != nil {
+		return "", err
+	}
+	actions = append(actions, fmt.Sprintf("http, Clear, %s/dismiss, method=POST, headers.Authorization=Bearer %s, clear=true", base, clearToken))
+
 	return strings.Join(actions, "; "), nil
+}
+
+// Clear marks each topic/id pair (from ArchivedReminder.NtfyMessageIDs) as
+// read/dismissed on ntfy's server, which syncs across every subscribed
+// client - not just the device that tapped the "Clear" button (that's
+// what the button's own clear=true attribute already covers, locally
+// only). Best-effort across topics: one topic failing doesn't stop the
+// others from being attempted. Unlike Send (which stops at the first
+// topic failure and relies on the scheduler's next-tick retry to catch
+// the rest), there's no retry mechanism here - a one-off dismiss action
+// only gets this one attempt, so it has to make its own best effort
+// across every topic in a single pass rather than deferring to a retry
+// that doesn't exist for this path. Only reports an error if every topic
+// failed.
+func (c *Client) Clear(ctx context.Context, topicIDs map[string]string) error {
+	var failed []string
+	for topic, id := range topicIDs {
+		if err := c.clearTopic(ctx, topic, id); err != nil {
+			slog.Error("failed to clear ntfy notification", "topic", topic, "id", id, "err", err)
+			failed = append(failed, topic)
+		}
+	}
+
+	if len(failed) > 0 && len(failed) == len(topicIDs) {
+		return fmt.Errorf("failed to clear notification on every topic: %s", strings.Join(failed, ", "))
+	}
+	return nil
+}
+
+func (c *Client) clearTopic(ctx context.Context, topic, id string) error {
+	url := fmt.Sprintf("%s/%s/%s/clear", strings.TrimRight(c.cfg.Ntfy.Server, "/"), topic, id)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.cfg.Ntfy.Token)
+
+	resp, err := c.publishClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("ntfy returned status %d: %s", resp.StatusCode, body)
+	}
+	return nil
 }
 
 func (c *Client) sendToTopic(ctx context.Context, text, topic string, mods ...ntfyMessageModifications) (string, error) {

@@ -1168,3 +1168,55 @@ func TestGet(t *testing.T) {
 		}
 	})
 }
+
+func TestGetArchived(t *testing.T) {
+	pending := reminder.Reminder{ID: "pending-1", Text: "buy milk"}
+	archived := reminder.ArchivedReminder{
+		Reminder:       reminder.Reminder{ID: "archived-1", Text: "call mom"},
+		NtfyMessageIDs: map[string]string{"family": "ntfy-id-1"},
+	}
+	store := &mockStore{saved: []reminder.Reminder{pending}, archive: []reminder.ArchivedReminder{archived}}
+	svc := New(store)
+
+	t.Run("found in archive", func(t *testing.T) {
+		got, err := svc.GetArchived("archived-1")
+		if err != nil {
+			t.Fatalf("GetArchived() error = %v", err)
+		}
+		if got == nil || got.ID != "archived-1" {
+			t.Fatalf("GetArchived() = %+v, want ID %q", got, "archived-1")
+		}
+		if got.NtfyMessageIDs["family"] != "ntfy-id-1" {
+			t.Errorf("GetArchived() NtfyMessageIDs = %+v, want family -> ntfy-id-1", got.NtfyMessageIDs)
+		}
+	})
+
+	t.Run("a pending reminder is not found - archive-only lookup", func(t *testing.T) {
+		got, err := svc.GetArchived("pending-1")
+		if !errors.Is(err, ErrNotFound) {
+			t.Fatalf("GetArchived() error = %v, want ErrNotFound", err)
+		}
+		if got != nil {
+			t.Errorf("GetArchived() = %+v, want nil", got)
+		}
+	})
+
+	t.Run("unknown id returns ErrNotFound", func(t *testing.T) {
+		got, err := svc.GetArchived("does-not-exist")
+		if !errors.Is(err, ErrNotFound) {
+			t.Fatalf("GetArchived() error = %v, want ErrNotFound", err)
+		}
+		if got != nil {
+			t.Errorf("GetArchived() = %+v, want nil", got)
+		}
+	})
+
+	t.Run("archive load error propagates", func(t *testing.T) {
+		failingStore := &mockStore{archiveErr: errors.New("disk read failed")}
+		failingSvc := New(failingStore)
+		_, err := failingSvc.GetArchived("anything")
+		if err == nil {
+			t.Fatal("GetArchived() error = nil, want the archive load error surfaced")
+		}
+	})
+}

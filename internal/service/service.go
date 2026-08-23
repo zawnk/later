@@ -431,6 +431,23 @@ func (s *Service) Get(id string) (*reminder.Reminder, *reminder.ArchivedReminder
 	return nil, nil, fmt.Errorf("reminder %s %w", id, ErrNotFound)
 }
 
+// GetArchived looks up id in the archive only - unlike Get, a pending
+// reminder is treated as not found. Used by the clear endpoint,
+// which only ever makes sense for a reminder that already fired (and so
+// already has NtfyMessageIDs to clear).
+func (s *Service) GetArchived(id string) (*reminder.ArchivedReminder, error) {
+	archive, err := s.store.ListArchive()
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range archive {
+		if r.ID == id {
+			return &r, nil
+		}
+	}
+	return nil, fmt.Errorf("reminder %s %w", id, ErrNotFound)
+}
+
 func (s *Service) Next() *reminder.Reminder {
 	pending := s.store.ListPendingReminders()
 	if len(pending) == 0 {

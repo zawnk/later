@@ -82,7 +82,7 @@ func main() {
 	}()
 
 	// start API
-	a := api.New(cfg, svc, actionSecret)
+	a := api.New(cfg, svc, actionSecret, ntfyClient)
 
 	var handler http.Handler = a.Routes()
 	if httpLog, _ := strconv.ParseBool(os.Getenv("LATER_HTTP_LOG")); httpLog {
