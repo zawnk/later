@@ -13,7 +13,7 @@
       "description": "gcr.io provides no release timestamps; don't hold digest updates forever",
       "matchDatasources": ["docker"],
       "matchUpdateTypes": ["digest"],
-      "minimumReleaseAge": null
+      "minimumReleaseAgeBehaviour": "timestamp-optional"
     }
   ]
 }
