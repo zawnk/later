@@ -1,9 +1,11 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strconv"
@@ -16,15 +18,20 @@ import (
 	"github.com/zawnk/later/internal/service"
 )
 
+type NotificationClearer interface {
+	Clear(ctx context.Context, topicIDs map[string]string) error
+}
+
 type API struct {
 	cfg              *config.Config
 	svc              *service.Service
 	actionSecret     []byte
+	clearer          NotificationClearer
 	actionTokensUsed *actiontoken.UsedTokenTracker
 }
 
-func New(cfg *config.Config, svc *service.Service, actionSecret []byte) *API {
-	return &API{cfg: cfg, svc: svc, actionSecret: actionSecret, actionTokensUsed: actiontoken.NewUsedTracker()}
+func New(cfg *config.Config, svc *service.Service, actionSecret []byte, clearer NotificationClearer) *API {
+	return &API{cfg: cfg, svc: svc, actionSecret: actionSecret, clearer: clearer, actionTokensUsed: actiontoken.NewUsedTracker()}
 }
 
 func (a *API) Routes() *http.ServeMux {
@@ -37,6 +44,7 @@ func (a *API) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /reminders/{id}", a.auth(a.getReminder, ""))
 	mux.HandleFunc("DELETE /reminders/{id}", a.auth(a.cancelReminder, ""))
 	mux.HandleFunc("POST /reminders/{id}/postpone", a.auth(a.postponeReminder, "postpone"))
+	mux.HandleFunc("POST /reminders/{id}/dismiss", a.auth(a.dismissReminder, "clear"))
 	mux.HandleFunc("POST /test/parse", a.auth(a.testParse, ""))
 	mux.HandleFunc("GET /healthz", a.healthz)
 
@@ -286,6 +294,22 @@ func (a *API) postponeReminder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJsonResponse(w, http.StatusCreated, rem)
+}
+
+func (a *API) dismissReminder(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	archived, err := a.svc.GetArchived(id)
+	if err != nil {
+		writeServiceError(w, err, "failed to load archived reminder")
+		return
+	}
+
+	if err := a.clearer.Clear(r.Context(), archived.NtfyMessageIDs); err != nil {
+		slog.Error("failed to clear notification", "id", id, "err", err)
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // testParse previews how text would be parsed by CreateReminder - task

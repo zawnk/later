@@ -282,7 +282,7 @@ func TestSend_ActionButtons(t *testing.T) {
 		}
 	})
 
-	t.Run("base_url configured: two action buttons attached with verifiable tokens", func(t *testing.T) {
+	t.Run("base_url configured: three action buttons attached with verifiable tokens", func(t *testing.T) {
 		srv, getReqs := recordingServer(t)
 		cfg := testConfig(srv.URL)
 		cfg.Server.BaseURL = "https://later.example.com"
@@ -295,10 +295,10 @@ func TestSend_ActionButtons(t *testing.T) {
 
 		actions := getReqs()[0].header.Get("Actions")
 		if actions == "" {
-			t.Fatal("Actions header is empty, want two action buttons")
+			t.Fatal("Actions header is empty, want three action buttons")
 		}
-		if !strings.Contains(actions, "Snooze 1h") || !strings.Contains(actions, "Tomorrow") {
-			t.Errorf("Actions header = %q, want both button labels", actions)
+		if !strings.Contains(actions, "Snooze 1h") || !strings.Contains(actions, "Tomorrow") || !strings.Contains(actions, "Clear") {
+			t.Errorf("Actions header = %q, want all three button labels", actions)
 		}
 		if !strings.Contains(actions, "https://later.example.com/reminders/abc123/postpone?duration=in+1h") {
 			t.Errorf("Actions header = %q, want the Snooze 1h button's callback URL", actions)
@@ -306,21 +306,33 @@ func TestSend_ActionButtons(t *testing.T) {
 		if !strings.Contains(actions, "https://later.example.com/reminders/abc123/postpone?duration=tomorrow+morning") {
 			t.Errorf("Actions header = %q, want the Tomorrow button's callback URL", actions)
 		}
-		if got := strings.Count(actions, "method=POST"); got != 2 {
-			t.Errorf("Actions header has %d method=POST occurrences, want 2 (one per button): %q", got, actions)
+		if !strings.Contains(actions, "https://later.example.com/reminders/abc123/dismiss") {
+			t.Errorf("Actions header = %q, want the Clear button's callback URL", actions)
+		}
+		if got := strings.Count(actions, "method=POST"); got != 3 {
+			t.Errorf("Actions header has %d method=POST occurrences, want 3 (one per button): %q", got, actions)
+		}
+		if got := strings.Count(actions, "clear=true"); got != 3 {
+			t.Errorf("Actions header has %d clear=true occurrences, want 3 (every button clears the local notification on tap): %q", got, actions)
 		}
 
 		tokenRe := regexp.MustCompile(`headers\.Authorization=Bearer (\S+?),`)
 		matches := tokenRe.FindAllStringSubmatch(actions, -1)
-		if len(matches) != 2 {
-			t.Fatalf("found %d bearer tokens in Actions header, want 2 (got: %q)", len(matches), actions)
+		if len(matches) != 3 {
+			t.Fatalf("found %d bearer tokens in Actions header, want 3 (got: %q)", len(matches), actions)
 		}
 		if matches[0][1] != matches[1][1] {
-			t.Error("the two buttons carry different tokens, want one shared token (the postpone duration, not the token, is what differs between them)")
+			t.Error("the Snooze/Tomorrow buttons carry different tokens, want one shared token (the postpone duration, not the token, is what differs between them)")
+		}
+		if matches[2][1] == matches[0][1] {
+			t.Error("the Clear button reuses the postpone token, want its own token scoped to the \"clear\" action")
 		}
 
 		if _, err := actiontoken.Verify(testActionSecret, matches[0][1], "abc123", "postpone"); err != nil {
-			t.Errorf("minted token failed to verify: %v", err)
+			t.Errorf("Snooze/Tomorrow token failed to verify as postpone: %v", err)
+		}
+		if _, err := actiontoken.Verify(testActionSecret, matches[2][1], "abc123", "clear"); err != nil {
+			t.Errorf("Clear button token failed to verify as clear: %v", err)
 		}
 	})
 
@@ -553,6 +565,75 @@ func TestSend_MissingIDIsAnError(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestClient_Clear(t *testing.T) {
+	t.Run("one PUT .../clear request per topic/id pair", func(t *testing.T) {
+		srv, getReqs := recordingServer(t)
+		c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
+
+		err := c.Clear(context.Background(), map[string]string{"topic-a": "id-a", "topic-b": "id-b"})
+		if err != nil {
+			t.Fatalf("Clear() error = %v", err)
+		}
+
+		reqs := getReqs()
+		if len(reqs) != 2 {
+			t.Fatalf("fake server saw %d requests, want 2 (one per topic)", len(reqs))
+		}
+
+		gotPaths := map[string]bool{}
+		for _, req := range reqs {
+			if req.method != http.MethodPut {
+				t.Errorf("request method = %q, want PUT", req.method)
+			}
+			if got := req.header.Get("Authorization"); got != "Bearer tk_test_token" {
+				t.Errorf("Authorization header = %q, want %q", got, "Bearer tk_test_token")
+			}
+			gotPaths[req.path] = true
+		}
+		if !gotPaths["/topic-a/id-a/clear"] || !gotPaths["/topic-b/id-b/clear"] {
+			t.Errorf("request paths = %+v, want /topic-a/id-a/clear and /topic-b/id-b/clear", gotPaths)
+		}
+	})
+
+	t.Run("one topic failing does not stop the others from being attempted", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.URL.Path, "/topic-bad/") {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		}))
+		t.Cleanup(srv.Close)
+		c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
+
+		err := c.Clear(context.Background(), map[string]string{"topic-bad": "id-a", "topic-good": "id-b"})
+		if err != nil {
+			t.Fatalf("Clear() error = %v, want nil when at least one topic succeeds (best-effort)", err)
+		}
+	})
+
+	t.Run("every topic failing is a reported error", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		t.Cleanup(srv.Close)
+		c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
+
+		err := c.Clear(context.Background(), map[string]string{"topic-a": "id-a"})
+		if err == nil {
+			t.Fatal("Clear() error = nil, want an error when every topic fails")
+		}
+	})
+
+	t.Run("no topics is a no-op, not an error", func(t *testing.T) {
+		c := New(testConfig("http://irrelevant"), testActionSecret, &stubReminderService{})
+
+		if err := c.Clear(context.Background(), map[string]string{}); err != nil {
+			t.Errorf("Clear() error = %v, want nil for an empty topic map", err)
+		}
+	})
 }
 
 func TestSendConfirmation(t *testing.T) {

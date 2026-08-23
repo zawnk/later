@@ -63,6 +63,13 @@ If you're already running ntfy, that's the only other piece you need - just plai
   "Snooze 1h" / "Tomorrow" buttons (ntfy's own `Actions` feature), each
   with a scoped, short-lived, single-use credential baked in. Opt-in:
   configure `base_url` and it turns on, leave it unset and it doesn't.
+- **Clear a notification everywhere, not just the device you tapped** -
+  a third button, "Clear", uses ntfy's server-side clear mechanism
+  rather than a purely local dismiss, so it syncs across every device
+  subscribed to that topic. Support for this specific ntfy feature varies
+  by client - check [ntfy's own docs](https://docs.ntfy.sh/publish/#updating-deleting-notifications)
+  for what's currently supported on yours, and note it needs ntfy server
+  v2.16.0+.
 - **A proper CLI** - free text, no quotes needed, works with piped input
   too. Sortable/limitable lists, quick access to what's coming up next or
   what just fired, search across pending or fired reminders, `--json`
@@ -113,7 +120,7 @@ services:
 
 ```yaml
 server:
-  base_url: https://later.yourdomain.com   # optional: enables Snooze/Tomorrow notification buttons; omit to leave that off
+  base_url: https://later.yourdomain.com   # optional: enables Snooze/Tomorrow/Clear notification buttons; omit to leave that off
 
 ntfy:
   server: https://ntfy.yourdomain.com
@@ -266,6 +273,7 @@ Token-based auth (`Authorization: Bearer <token>`), JSON in and out.
 | `GET` | `/reminders/last` | The most recently fired reminder. |
 | `DELETE` | `/reminders/{id}` | Cancel a pending reminder. |
 | `POST` | `/reminders/{id}/postpone?duration=1h` | `duration` is a query param - compact or natural language. |
+| `POST` | `/reminders/{id}/dismiss` | Clears the fired notification across every subscribed device (ntfy server-side, not just the calling client). `{id}` must be archived. |
 | `POST` | `/test/parse` | Preview parsing. Body: `{"text": "..."}`. Creates nothing. |
 | `GET` | `/healthz` | No token needed. |
 
@@ -276,10 +284,17 @@ Errors come back as `{"error": "..."}` with a non-2xx status.
 - If you rotate or purge `archive.json` (neither should be necessary in
   normal use), be aware some functionality references archived reminder
   IDs - postpone, for instance.
-- The notification action buttons (Snooze/Tomorrow) are tapped from your
-  *phone*, calling `base_url` directly - so a private LAN `base_url` only
-  works when the device tapping the button can actually reach it (same
-  network, reverse proxy or a VPN back to it).
+- The notification action buttons (Snooze/Tomorrow/Clear) are tapped from
+  your *phone*, calling `base_url` directly - so a private LAN `base_url`
+  only works when the device tapping the button can actually reach it
+  (same network, reverse proxy or a VPN back to it).
+- The "Clear" button's multi-device sync is only as good as your ntfy
+  client's own support for it - not every ntfy client implements the
+  clear/read mechanism, and support has been inconsistent across ntfy's
+  own docs snapshots. It's still safe to tap either way (worst case it
+  behaves like a local dismiss), just don't assume it's guaranteed to
+  clear every device until you've confirmed your specific client(s)
+  support it.
 - A bare `base_url` with no scheme (e.g. `192.168.1.53:8080`) is assumed
   to be `http://`, not `https://` - fine for most home networks; put a
   scheme on it yourself once you have TLS in front of it.
