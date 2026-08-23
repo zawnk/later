@@ -412,6 +412,108 @@ func TestArchiveLimit(t *testing.T) {
 	}
 }
 
+func TestArchiveVerbose(t *testing.T) {
+	archived := []reminder.ArchivedReminder{
+		{
+			Reminder: reminder.Reminder{
+				ID:             "abc123",
+				Text:           "renew certificate",
+				OutboundTopics: []string{"ops-alerts", "backup-topic"},
+			},
+			NtfyMessageIDs: map[string]string{
+				"ops-alerts": "01H_OPS_ID",
+			},
+		},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Total-Count", "1")
+		_ = json.NewEncoder(w).Encode(archived)
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "archive"); err != nil {
+		t.Fatalf(`runCLI("archive") error = %v`, err)
+	}
+	if strings.Contains(out.String(), "ops-alerts") {
+		t.Errorf("non-verbose archive output = %q, want no topic detail", out.String())
+	}
+
+	out.Reset()
+	if err := runCLI(t, a, "archive", "--verbose"); err != nil {
+		t.Fatalf(`runCLI("archive --verbose") error = %v`, err)
+	}
+	got := out.String()
+
+	if !strings.Contains(got, "├── sent to ops-alerts (ntfy id: 01H_OPS_ID)") {
+		t.Errorf("archive --verbose output = %q, want a branch line for ops-alerts with its ntfy id", got)
+	}
+	if !strings.Contains(got, "└── sent to backup-topic (ntfy id: unknown)") {
+		t.Errorf("archive --verbose output = %q, want a final branch line for backup-topic with unknown ntfy id", got)
+	}
+}
+
+func TestArchiveVerboseIsNoOpUnderJSON(t *testing.T) {
+	archived := []reminder.ArchivedReminder{
+		{
+			Reminder: reminder.Reminder{ID: "abc123", OutboundTopics: []string{"ops-alerts"}},
+			NtfyMessageIDs: map[string]string{
+				"ops-alerts": "01H_OPS_ID",
+			},
+		},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Total-Count", "1")
+		_ = json.NewEncoder(w).Encode(archived)
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "--json", "archive", "--verbose"); err != nil {
+		t.Fatalf(`runCLI("--json archive --verbose") error = %v`, err)
+	}
+
+	var got []reminder.ArchivedReminder
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf(`"--json archive --verbose" output is not valid JSON: %v; output: %q`, err, out.String())
+	}
+	if len(got) != 1 || got[0].NtfyMessageIDs["ops-alerts"] != "01H_OPS_ID" {
+		t.Errorf(`"--json archive --verbose" decoded to %+v, want the full archived reminder unaffected by --verbose`, got)
+	}
+}
+
+func TestSearchArchiveVerbose(t *testing.T) {
+	archived := []reminder.ArchivedReminder{
+		{
+			Reminder: reminder.Reminder{
+				ID:             "archived-1",
+				Text:           "buy milk",
+				OutboundTopics: []string{"family"},
+			},
+			NtfyMessageIDs: map[string]string{"family": "01H_FAM_ID"},
+		},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(archived)
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "search", "milk", "--archive", "--verbose"); err != nil {
+		t.Fatalf(`runCLI("search milk --archive --verbose") error = %v`, err)
+	}
+
+	if want := "└── sent to family (ntfy id: 01H_FAM_ID)"; !strings.Contains(out.String(), want) {
+		t.Errorf("search --archive --verbose output = %q, want it to contain %q", out.String(), want)
+	}
+}
+
 func TestSearch(t *testing.T) {
 	pending := []reminder.Reminder{{ID: "pending-1", Text: "buy milk"}}
 	archived := []reminder.ArchivedReminder{{Reminder: reminder.Reminder{ID: "archived-1", Text: "buy milk"}}}
