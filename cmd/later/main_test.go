@@ -230,6 +230,34 @@ func TestSubcommandDispatch(t *testing.T) {
 	}
 }
 
+func TestPostponeVerbose(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(reminder.Reminder{
+			ID:       "abc123",
+			Text:     "renew certificate",
+			DueAt:    time.Now().Add(1 * time.Hour),
+			Priority: "urgent",
+			Tags:     []string{"work"},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "postpone", "abc123", "1h", "--verbose"); err != nil {
+		t.Fatalf(`runCLI("postpone --verbose") error = %v`, err)
+	}
+	got := out.String()
+
+	if !strings.Contains(got, "urgent") || !strings.Contains(got, "#work") {
+		t.Errorf("postpone --verbose output = %q, want priority/tags rendered", got)
+	}
+	if strings.Contains(got, "postponed to") {
+		t.Errorf("postpone --verbose output = %q, want the table-row rendering, not the plain sentence", got)
+	}
+}
+
 func TestMissingArgsRejectedByParser(t *testing.T) {
 	a := &app{out: io.Discard, url: "http://irrelevant", token: "tk_test"}
 
@@ -615,6 +643,76 @@ func TestNextEmptyIsNotAnError(t *testing.T) {
 
 	if strings.TrimSpace(out.String()) != "null" {
 		t.Errorf(`"--json next" output = %q, want null`, out.String())
+	}
+}
+
+func TestNextVerbose(t *testing.T) {
+	rem := reminder.Reminder{
+		ID:       "abc123",
+		Text:     "renew certificate",
+		DueAt:    time.Now().Add(1 * time.Hour),
+		Priority: "urgent",
+		Tags:     []string{"work"},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(rem)
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "next"); err != nil {
+		t.Fatalf(`runCLI("next") error = %v`, err)
+	}
+	if strings.Contains(out.String(), "urgent") {
+		t.Errorf("non-verbose next output = %q, want no priority detail", out.String())
+	}
+
+	out.Reset()
+	if err := runCLI(t, a, "next", "--verbose"); err != nil {
+		t.Fatalf(`runCLI("next --verbose") error = %v`, err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "urgent") || !strings.Contains(got, "#work") {
+		t.Errorf("next --verbose output = %q, want priority/tags rendered", got)
+	}
+	if strings.Contains(got, "Today") || strings.Contains(got, "Overdue") || strings.Contains(got, "Tomorrow") || strings.Contains(got, "Later") {
+		t.Errorf("next --verbose output = %q, want no ETA bucket header for a single reminder", got)
+	}
+}
+
+func TestLastVerbose(t *testing.T) {
+	rem := reminder.ArchivedReminder{
+		Reminder: reminder.Reminder{
+			ID:             "abc123",
+			Text:           "renew certificate",
+			OutboundTopics: []string{"ops-alerts"},
+		},
+		NtfyMessageIDs: map[string]string{"ops-alerts": "01H_OPS_ID"},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(rem)
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "last"); err != nil {
+		t.Fatalf(`runCLI("last") error = %v`, err)
+	}
+	if strings.Contains(out.String(), "ops-alerts") {
+		t.Errorf("non-verbose last output = %q, want no topic detail", out.String())
+	}
+
+	out.Reset()
+	if err := runCLI(t, a, "last", "--verbose"); err != nil {
+		t.Fatalf(`runCLI("last --verbose") error = %v`, err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "└── sent to ops-alerts (ntfy id: 01H_OPS_ID)") {
+		t.Errorf("last --verbose output = %q, want a branch line for ops-alerts", got)
 	}
 }
 
@@ -1083,6 +1181,37 @@ func TestCreateWithPriority(t *testing.T) {
 
 	if gotBody != "" {
 		t.Errorf("server was reached with body %s, want no request for an invalid priority", gotBody)
+	}
+}
+
+func TestCreateVerbose(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(reminder.Reminder{
+			ID:       "abc123",
+			Text:     "renew certificate",
+			DueAt:    time.Now().Add(1 * time.Hour),
+			Priority: "urgent",
+			Tags:     []string{"work"},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "renew", "certificate", "--priority=urgent", "--tag=work", "--verbose"); err != nil {
+		t.Fatalf(`runCLI() with --verbose error = %v`, err)
+	}
+	got := out.String()
+
+	if !strings.Contains(got, "urgent") || !strings.Contains(got, "#work") {
+		t.Errorf("create --verbose output = %q, want priority/tags rendered", got)
+	}
+	if strings.Contains(got, "set for") {
+		t.Errorf("create --verbose output = %q, want the table-row rendering, not the plain sentence", got)
 	}
 }
 
