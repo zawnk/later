@@ -184,7 +184,8 @@ func (l *ListCmd) Run(a *app) error {
 }
 
 type ArchiveCmd struct {
-	Limit int `help:"Show only the N most recent entries (0 = all)." default:"20"`
+	Limit   int  `help:"Show only the N most recent entries (0 = all)." default:"20"`
+	Verbose bool `short:"v" help:"Also show each outbound topic and its ntfy message id."`
 }
 
 func (c *ArchiveCmd) Run(a *app) error {
@@ -208,7 +209,7 @@ func (c *ArchiveCmd) Run(a *app) error {
 		return nil
 	}
 	for _, r := range archived {
-		fmt.Fprintf(a.out, "%s  fired %s  %s\n", r.ID, formatTime(r.FiredAt), r.Text)
+		printArchiveEntry(a.out, &r, c.Verbose)
 	}
 	if len(archived) < total {
 		fmt.Fprintf(a.out, "(showing %d of %d, use --limit to adjust)\n", len(archived), total)
@@ -216,10 +217,32 @@ func (c *ArchiveCmd) Run(a *app) error {
 	return nil
 }
 
+// printArchiveEntry prints one archived reminder in the CLI's plain text
+// format, optionally followed by a tree of the topics it was sent to and
+// their ntfy message ids.
+func printArchiveEntry(w io.Writer, r *reminder.ArchivedReminder, verbose bool) {
+	fmt.Fprintf(w, "%s  fired %s  %s\n", r.ID, formatTime(r.FiredAt), r.Text)
+	if !verbose {
+		return
+	}
+	for i, topic := range r.OutboundTopics {
+		branch := "├──"
+		if i == len(r.OutboundTopics)-1 {
+			branch = "└──"
+		}
+		ntfyID, ok := r.NtfyMessageIDs[topic]
+		if !ok {
+			ntfyID = "unknown"
+		}
+		fmt.Fprintf(w, "    %s sent to %s (ntfy id: %s)\n", branch, topic, ntfyID)
+	}
+}
+
 type SearchCmd struct {
 	Text    []string `arg:"" help:"Search query, no quotes needed. Matched as a case-insensitive substring against reminder text."`
 	Pending bool     `help:"Search pending reminders (the default)." xor:"bucket"`
 	Archive bool     `help:"Search archived reminders instead." xor:"bucket"`
+	Verbose bool     `short:"v" help:"With --archive, also show each outbound topic and its ntfy message id."`
 }
 
 func (c *SearchCmd) Run(a *app) error {
@@ -245,7 +268,7 @@ func (c *SearchCmd) Run(a *app) error {
 			return nil
 		}
 		for _, r := range archived {
-			fmt.Fprintf(a.out, "%s  fired %s  %s\n", r.ID, formatTime(r.FiredAt), r.Text)
+			printArchiveEntry(a.out, &r, c.Verbose)
 		}
 		return nil
 	}
