@@ -90,6 +90,7 @@ type CreateCmd struct {
 	Tag      []string `help:"ntfy tag(s) for the notification (emoji shortcodes like partying_face, or plain labels), repeatable or comma-separated." placeholder:"TAG"`
 	Priority string   `short:"p" help:"Notification priority: min, low, default, high, urgent, max. Late reminders are bumped to at least high." enum:",min,low,default,high,urgent,max" default:""`
 	Click    string   `help:"URL the ntfy client opens when the notification is tapped." placeholder:"URL"`
+	Verbose  bool     `short:"v" help:"Also show priority/tags/topics."`
 }
 
 func (c *CreateCmd) Run(a *app) error {
@@ -124,7 +125,11 @@ func (c *CreateCmd) Run(a *app) error {
 	if a.json {
 		return a.printJSON(rem)
 	}
-	fmt.Fprintf(a.out, "set for %s: %s (%s)\n", formatTime(rem.DueAt), rem.Text, rem.ID)
+	if !c.Verbose {
+		fmt.Fprintf(a.out, "set for %s: %s (%s)\n", formatTime(rem.DueAt), rem.Text, rem.ID)
+		return nil
+	}
+	printSinglePendingVerbose(a.out, *rem)
 	return nil
 }
 
@@ -311,6 +316,25 @@ func printPendingEntries(w io.Writer, reminders []reminder.Reminder, by string, 
 	}
 }
 
+// printSinglePendingVerbose renders one pending reminder's priority/tags/
+// topics, for commands like `next -v` that show exactly one reminder --
+// unlike printPendingEntries, there's no bucket header (a single item's ETA
+// bucket is not informative) and no column padding (nothing to align
+// against).
+func printSinglePendingVerbose(w io.Writer, r reminder.Reminder) {
+	fmt.Fprintf(w, "%s  %s", r.ID, dueCell(r))
+	if r.Priority != "" {
+		fmt.Fprintf(w, "  %s", priorityCell(r))
+	}
+	if len(r.Tags) > 0 {
+		fmt.Fprintf(w, "  %s", tagsCell(r))
+	}
+	if len(r.OutboundTopics) > 0 {
+		fmt.Fprintf(w, "  %s", topicsCell(r))
+	}
+	fmt.Fprintf(w, "  %s\n", r.Text)
+}
+
 type pendingBucket struct {
 	label string
 	items []reminder.Reminder
@@ -493,7 +517,9 @@ func (c *SearchCmd) Run(a *app) error {
 	return nil
 }
 
-type NextCmd struct{}
+type NextCmd struct {
+	Verbose bool `short:"v" help:"Also show priority/tags/topics."`
+}
 
 func (n *NextCmd) Run(a *app) error {
 	cl, err := a.client()
@@ -514,11 +540,17 @@ func (n *NextCmd) Run(a *app) error {
 	if a.json {
 		return a.printJSON(rem)
 	}
-	fmt.Fprintf(a.out, "%s  due %s  %s\n", rem.ID, formatTime(rem.DueAt), rem.Text)
+	if !n.Verbose {
+		fmt.Fprintf(a.out, "%s  due %s  %s\n", rem.ID, formatTime(rem.DueAt), rem.Text)
+		return nil
+	}
+	printSinglePendingVerbose(a.out, *rem)
 	return nil
 }
 
-type LastCmd struct{}
+type LastCmd struct {
+	Verbose bool `short:"v" help:"Also show each outbound topic and its ntfy message id."`
+}
 
 func (l *LastCmd) Run(a *app) error {
 	cl, err := a.client()
@@ -539,7 +571,7 @@ func (l *LastCmd) Run(a *app) error {
 	if a.json {
 		return a.printJSON(rem)
 	}
-	fmt.Fprintf(a.out, "%s  fired %s  %s\n", rem.ID, formatTime(rem.FiredAt), rem.Text)
+	printArchiveEntry(a.out, rem, l.Verbose)
 	return nil
 }
 
@@ -569,6 +601,7 @@ func (c *CancelCmd) Run(a *app) error {
 type PostponeCmd struct {
 	ID       string `arg:"" help:"Reminder id, or 'last' for the one most recently created by this CLI."`
 	Duration string `arg:"" help:"How far to push it from now: a compact duration (1d, 2h30m) or natural language (tomorrow morning, next monday)."`
+	Verbose  bool   `short:"v" help:"Also show priority/tags/topics."`
 }
 
 func (p *PostponeCmd) Run(a *app) error {
@@ -592,7 +625,11 @@ func (p *PostponeCmd) Run(a *app) error {
 	if a.json {
 		return a.printJSON(rem)
 	}
-	fmt.Fprintf(a.out, "reminder %s postponed to %s as %s: %s\n", id, formatTime(rem.DueAt), rem.ID, rem.Text)
+	if !p.Verbose {
+		fmt.Fprintf(a.out, "reminder %s postponed to %s as %s: %s\n", id, formatTime(rem.DueAt), rem.ID, rem.Text)
+		return nil
+	}
+	printSinglePendingVerbose(a.out, *rem)
 	return nil
 }
 
