@@ -337,10 +337,10 @@ func dueProximityLabel(r reminder.Reminder, now time.Time) string {
 	if r.DueAt.Before(now) {
 		return "Overdue"
 	}
-	switch days := int(dayStart(r.DueAt).Sub(dayStart(now)).Hours() / 24); {
-	case days == 0:
+	switch days := int(dayStart(r.DueAt).Sub(dayStart(now)).Hours() / 24); days {
+	case 0:
 		return "Today"
-	case days == 1:
+	case 1:
 		return "Tomorrow"
 	default:
 		return "Later"
