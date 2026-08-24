@@ -10,9 +10,8 @@
   "minimumReleaseAge": "3 days",
   "packageRules": [
     {
-      "description": "gcr.io provides no release timestamps; don't hold digest updates forever",
-      "matchDatasources": ["docker"],
-      "matchUpdateTypes": ["digest"],
+      "description": "Digest pins have no release timestamp of their own, so don't hold them up waiting for one",
+      "matchUpdateTypes": ["digest", "pinDigest"],
       "minimumReleaseAgeBehaviour": "timestamp-optional"
     }
   ]
