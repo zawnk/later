@@ -149,11 +149,11 @@ option, including optional ones like `default_outbound`.
 curl -X POST https://later.yourdomain.com/reminders \
   -H "Authorization: Bearer tk_replace_this_with_a_real_token_at_least_16_chars" \
   -H "Content-Type: application/json" \
-  -d '{"text": "in 15s test the setup"}'
+  -d '{"text": "in 1 minute test the setup"}'
 ```
 
-...or just install the CLI and run `later in 15s test the setup`.
-Fifteen seconds later, a push notification should land on your phone.
+...or just install the CLI and run `later in 1 minute test the setup`.
+Shortly after, a push notification should land on your phone.
 
 ## The CLI
 
@@ -162,16 +162,16 @@ Grab a binary from the [Releases page](https://github.com/zawnk/later/releases?q
 Docker-image release):
 
 ```
-curl -LO https://github.com/zawnk/later/releases/download/later/v0.1.1/later_v0.1.1_linux_amd64
-chmod +x later_v0.1.1_linux_amd64
-sudo mv later_v0.1.1_linux_amd64 /usr/local/bin/later
+curl -LO https://github.com/zawnk/later/releases/download/later/v0.2.0/later_v0.2.0_linux_amd64
+chmod +x later_v0.2.0_linux_amd64
+sudo mv later_v0.2.0_linux_amd64 /usr/local/bin/later
 ```
 
 (swap `amd64` for `arm64` if that's your machine; a `later_checksums.txt`
 ships alongside each release if you want to verify the download)
 
 Only Linux binaries are published right now. On macOS or Windows, build
-it yourself instead (needs [Go](https://go.dev) 1.26+):
+it yourself instead (needs [Go](https://go.dev) 1.27+):
 
 ```
 git clone https://github.com/zawnk/later.git
@@ -309,6 +309,10 @@ Errors come back as `{"error": "..."}` with a non-2xx status.
   coupling is the point. `later` leans on ntfy for delivery, priorities,
   tags, click actions, and the action-button mechanism instead of
   reimplementing all of it.
+- **Sub-minute precision** - the scheduler wakes up once a minute by
+  design, not because tighter polling is impossible. `later` nudges you about
+  things later; it's not a countdown timer, so it doesn't try to be
+  exact to the second.
 
 ## License
 
