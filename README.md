@@ -266,9 +266,9 @@ Token-based auth (`Authorization: Bearer <token>`), JSON in and out.
 | Method | Path | Notes |
 |---|---|---|
 | `POST` | `/reminders` | Create. Body: `{"text": "...", "outbound_topics": [...], "tags": [...], "priority": "...", "click": "..."}` - only `text` is required. |
-| `GET` | `/reminders` | List pending. `?sort=due\|create`, `?q=<substring>`. |
+| `GET` | `/reminders` | List pending. `?sort=due\|create`, `?q=<substring>`, `?limit=N`, `?offset=N`. |
 | `GET` | `/reminders/{id}` | Fetch one, pending or archived. |
-| `GET` | `/reminders/archive` | List fired. `?limit=N`, `?q=<substring>`. |
+| `GET` | `/reminders/archive` | List fired. `?limit=N`, `?offset=N` (paging back from the newest), `?q=<substring>`. |
 | `GET` | `/reminders/next` | The soonest-due pending reminder. |
 | `GET` | `/reminders/last` | The most recently fired reminder. |
 | `DELETE` | `/reminders/{id}` | Cancel a pending reminder. |
