@@ -311,7 +311,7 @@ func TestCreateReminder_TopicScoping(t *testing.T) {
 	}
 }
 
-func TestListArchive_Limit(t *testing.T) {
+func TestListArchive_Pagination(t *testing.T) {
 	cfg := &config.Config{
 		AuthTokens: []config.Token{{Token: "valid-token", Outbound: []string{"topic-a"}}},
 	}
@@ -334,6 +334,15 @@ func TestListArchive_Limit(t *testing.T) {
 		{"limit=0 means no limit", "?limit=0", http.StatusOK, []string{"1", "2", "3"}, "3"},
 		{"negative limit is rejected", "?limit=-1", http.StatusBadRequest, nil, ""},
 		{"non-numeric limit is rejected", "?limit=abc", http.StatusBadRequest, nil, ""},
+		{"offset alone skips the N most recent", "?offset=1", http.StatusOK, []string{"1", "2"}, "3"},
+		{"limit and offset page backwards from the most recent", "?limit=1&offset=1", http.StatusOK, []string{"2"}, "3"},
+		{"the last page is the oldest entry", "?limit=1&offset=2", http.StatusOK, []string{"1"}, "3"},
+		{"a page past the oldest entry is empty", "?limit=1&offset=3", http.StatusOK, []string{}, "3"},
+		{"offset past the total is empty, not an error", "?offset=99", http.StatusOK, []string{}, "3"},
+		{"a page overlapping the start is clamped, not wrapped", "?limit=2&offset=2", http.StatusOK, []string{"1"}, "3"},
+		{"offset=0 is the first page", "?limit=2&offset=0", http.StatusOK, []string{"2", "3"}, "3"},
+		{"negative offset is rejected", "?offset=-1", http.StatusBadRequest, nil, ""},
+		{"non-numeric offset is rejected", "?offset=abc", http.StatusBadRequest, nil, ""},
 	}
 
 	for _, tt := range tests {
@@ -396,6 +405,7 @@ func TestListArchive_Search(t *testing.T) {
 		{"case-insensitive match", "?q=BUY", []string{"1", "3"}, "2"},
 		{"no matches", "?q=nonexistent", []string{}, "0"},
 		{"q and limit combine: filters first, then truncates the filtered set", "?q=buy&limit=1", []string{"3"}, "2"},
+		{"offset pages within the filtered set, not the whole archive", "?q=buy&limit=1&offset=1", []string{"1"}, "2"},
 	}
 
 	for _, tt := range tests {
@@ -1059,6 +1069,76 @@ func TestListPending_Search(t *testing.T) {
 
 			if rr.Code != http.StatusOK {
 				t.Fatalf("status = %d, want %d (body: %s)", rr.Code, http.StatusOK, rr.Body.String())
+			}
+
+			var got []reminder.Reminder
+			if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+				t.Fatalf("decoding response: %v", err)
+			}
+			gotIDs := []string{}
+			for _, r := range got {
+				gotIDs = append(gotIDs, r.ID)
+			}
+
+			if !slices.Equal(gotIDs, tt.wantIDs) {
+				t.Errorf("reminder IDs = %v, want %v", gotIDs, tt.wantIDs)
+			}
+		})
+	}
+}
+
+func TestListPending_Pagination(t *testing.T) {
+	cfg := &config.Config{
+		AuthTokens: []config.Token{{Token: "valid-token", Outbound: []string{"topic-a"}}},
+	}
+	base := time.Date(2026, 6, 16, 9, 0, 0, 0, time.UTC)
+	pending := []reminder.Reminder{
+		{ID: "3", Text: "third", DueAt: base.Add(3 * time.Hour)},
+		{ID: "1", Text: "first", DueAt: base.Add(1 * time.Hour)},
+		{ID: "2", Text: "second", DueAt: base.Add(2 * time.Hour)},
+	}
+
+	tests := []struct {
+		name       string
+		query      string
+		wantStatus int
+		wantIDs    []string
+		wantTotal  string
+	}{
+		{"no params returns everything, soonest-first", "", http.StatusOK, []string{"1", "2", "3"}, "3"},
+		{"limit takes the soonest N", "?limit=2", http.StatusOK, []string{"1", "2"}, "3"},
+		{"limit=0 means no limit", "?limit=0", http.StatusOK, []string{"1", "2", "3"}, "3"},
+		{"limit wider than total returns everything", "?limit=10", http.StatusOK, []string{"1", "2", "3"}, "3"},
+		{"offset alone skips the N soonest", "?offset=1", http.StatusOK, []string{"2", "3"}, "3"},
+		{"limit and offset page forwards", "?limit=1&offset=1", http.StatusOK, []string{"2"}, "3"},
+		{"a page overlapping the end is clamped", "?limit=2&offset=2", http.StatusOK, []string{"3"}, "3"},
+		{"offset past the total is empty, not an error", "?offset=99", http.StatusOK, []string{}, "3"},
+		{"paging applies after the sort", "?sort=create&limit=1", http.StatusOK, []string{"3"}, "3"},
+		{"paging applies after the search", "?q=ir&limit=1&offset=1", http.StatusOK, []string{"3"}, "2"},
+		{"negative limit is rejected", "?limit=-1", http.StatusBadRequest, nil, ""},
+		{"non-numeric offset is rejected", "?offset=abc", http.StatusBadRequest, nil, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &stubStore{pending: slices.Clone(pending)}
+			a := New(cfg, service.New(store), testActionSecret, nil)
+
+			req := httptest.NewRequest(http.MethodGet, "/reminders"+tt.query, nil)
+			req.Header.Set("Authorization", "Bearer valid-token")
+			rr := httptest.NewRecorder()
+			a.Routes().ServeHTTP(rr, req)
+
+			if rr.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d (body: %s)", rr.Code, tt.wantStatus, rr.Body.String())
+			}
+
+			if tt.wantIDs == nil {
+				return
+			}
+
+			if got := rr.Header().Get("X-Total-Count"); got != tt.wantTotal {
+				t.Errorf("X-Total-Count = %q, want %q (the true total, unaffected by paging)", got, tt.wantTotal)
 			}
 
 			var got []reminder.Reminder

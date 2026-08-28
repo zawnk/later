@@ -181,7 +181,54 @@ func (a *API) listPending(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	limit, offset, ok := pageParams(w, r)
+	if !ok {
+		return
+	}
+	total := len(reminders)
+
+	// Pending is presented soonest-first, so a page walks forward from
+	// the head: offset skips the N soonest, limit takes the next N.
+	start := min(offset, total)
+	end := total
+	if limit > 0 {
+		end = min(start+limit, total)
+	}
+	reminders = reminders[start:end]
+
+	w.Header().Set("X-Total-Count", strconv.Itoa(total))
 	writeJsonResponse(w, http.StatusOK, reminders)
+}
+
+// pageParams parses the ?limit= and ?offset= pagination params shared by
+// the list endpoints. Both are optional and must be non-negative; limit 0
+// (or absent) means "no limit", and offset counts from the most relevant
+// end of the list - the soonest-due for pending, the newest for the
+// archive - so page k is offset k*limit either way. ok is false when the
+// params were bad and an error response has already been written.
+func pageParams(w http.ResponseWriter, r *http.Request) (limit, offset int, ok bool) {
+	if limit, ok = intParam(w, r, "limit"); !ok {
+		return 0, 0, false
+	}
+	if offset, ok = intParam(w, r, "offset"); !ok {
+		return 0, 0, false
+	}
+	return limit, offset, true
+}
+
+func intParam(w http.ResponseWriter, r *http.Request, name string) (int, bool) {
+	raw := r.URL.Query().Get(name)
+	if raw == "" {
+		return 0, true
+	}
+
+	v, err := strconv.Atoi(raw)
+	if err != nil || v < 0 {
+		writeJSONError(w, name+" must be a non-negative integer", http.StatusBadRequest)
+		return 0, false
+	}
+
+	return v, true
 }
 
 func (a *API) listArchive(w http.ResponseWriter, r *http.Request) {
@@ -193,18 +240,20 @@ func (a *API) listArchive(w http.ResponseWriter, r *http.Request) {
 	reminders = filterByQuery(reminders, r.URL.Query().Get("q"), func(r reminder.ArchivedReminder) string { return r.Text })
 	total := len(reminders)
 
-	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-		limit, err := strconv.Atoi(limitStr)
-
-		if err != nil || limit < 0 {
-			writeJSONError(w, "limit must be a non-negative integer", http.StatusBadRequest)
-			return
-		}
-
-		if limit > 0 && total > limit {
-			reminders = reminders[total-limit:]
-		}
+	limit, offset, ok := pageParams(w, r)
+	if !ok {
+		return
 	}
+
+	// The archive is stored oldest-first but read newest-first, so a page
+	// walks backwards from the tail: offset skips the N newest, limit
+	// takes the N before those. The slice itself stays oldest-first.
+	end := max(total-offset, 0)
+	start := 0
+	if limit > 0 {
+		start = max(end-limit, 0)
+	}
+	reminders = reminders[start:end]
 
 	w.Header().Set("X-Total-Count", strconv.Itoa(total))
 	writeJsonResponse(w, http.StatusOK, reminders)
