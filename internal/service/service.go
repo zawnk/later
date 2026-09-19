@@ -382,8 +382,7 @@ func (s *Service) SetStub(name string, stub reminder.Stub) (bool, error) {
 //
 // Two checks are the stub surface's own. A stub-shaped body is rejected
 // because expansion happens once, so it could never resolve. And the
-// name must conform exactly - see stubNameRegex on why a write does not
-// fold case.
+// name must conform exactly.
 func (s *Service) validateStub(name string, stub reminder.Stub) error {
 	if !stubNameRegex.MatchString(name) {
 		return fmt.Errorf("%w: stub name %q must be lowercase, start with a letter, and hold only letters, digits, '-' and '_'", ErrInvalidInput, name)
