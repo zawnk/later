@@ -736,6 +736,22 @@ func TestCreateReminder_NotificationOptionsValidation(t *testing.T) {
 	}
 }
 
+func TestCreateReminder_ReportsInvalidPriorityOverUnparseableText(t *testing.T) {
+	svc := New(&mockStore{})
+	svc.now = func() time.Time { return time.Date(2026, 6, 15, 9, 0, 0, 0, time.Local) }
+
+	_, err := svc.CreateReminder(CreateInput{Text: "no time reference here", Priority: "hgih"})
+	if err == nil {
+		t.Fatal("CreateReminder() with an invalid priority and unparseable text error = nil, want an error")
+	}
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("CreateReminder() error = %v, want it to wrap ErrInvalidInput", err)
+	}
+	if !strings.Contains(err.Error(), "invalid priority") {
+		t.Errorf("CreateReminder() error = %v, want the invalid-priority error: everything ntfy would reject is rejected before the text is parsed", err)
+	}
+}
+
 func TestNext(t *testing.T) {
 	tests := []struct {
 		name    string

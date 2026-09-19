@@ -155,8 +155,11 @@ func New(s Store) *Service {
 // backs the /test/parse "show what would be scheduled" preview (CLI, API,
 // and the ntfy inbound "/test <text>" trigger). Returns the same
 // ErrInvalidInput-wrapped errors CreateReminder would, since it's the same
-// code, so a preview failure is always the real reason a real create would
-// also fail.
+// code, so a preview failure is always a real reason a real create would
+// also fail - though not necessarily the first one reported: CreateReminder
+// validates notification options ahead of parsing, so input wrong in both
+// ways at once previews as a parse failure and creates as an option
+// failure.
 func (s *Service) ParseReminderText(text string) (task string, due time.Time, err error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -187,13 +190,33 @@ func (s *Service) ParseReminderText(text string) (task string, due time.Time, er
 	return task, dueAt, nil
 }
 
+// CreateReminder runs creation as an explicit, ordered sequence of named
+// steps, each of which may reject the input before the next one runs:
+//
+//  1. validateNotificationOptions - the notification options ntfy itself
+//     would reject (priority, click).
+//  2. ParseReminderText - task text and due time out of in.Text.
+//  3. generateUniqueID - an id that collides with nothing pending or
+//     archived.
+//  4. newReminder - assemble the record.
+//  5. store.SaveReminder - persist it.
+//
+// The order is load-bearing. Option validation runs
+// first because everything ntfy would reject must be rejected at create
+// time, while there is still a caller to report it to: a reminder that
+// stores cleanly and then fails forever at fire time is the one outcome
+// this pipeline exists to prevent. That is also why anything that can
+// *supply* those options - stub resolution, when it lands - has to be
+// inserted ahead of step 1 rather than after it: a hand-edited stub
+// carrying a bad priority would otherwise slip past create-time
+// validation entirely.
 func (s *Service) CreateReminder(in CreateInput) (*reminder.Reminder, error) {
-	task, dueAt, err := s.ParseReminderText(in.Text)
-	if err != nil {
+	if err := validateNotificationOptions(in); err != nil {
 		return nil, err
 	}
 
-	if err := validateNotificationOptions(in); err != nil {
+	task, dueAt, err := s.ParseReminderText(in.Text)
+	if err != nil {
 		return nil, err
 	}
 
@@ -202,7 +225,22 @@ func (s *Service) CreateReminder(in CreateInput) (*reminder.Reminder, error) {
 		return nil, fmt.Errorf("failed to generate reminder id: %w", err)
 	}
 
-	rem := &reminder.Reminder{
+	rem := s.newReminder(id, task, dueAt, in)
+
+	if err := s.store.SaveReminder(*rem); err != nil {
+		return nil, fmt.Errorf("failed to store reminder: %w", err)
+	}
+
+	return rem, nil
+}
+
+// newReminder assembles the stored record out of an already-validated
+// input, an already-parsed task and due time, and an already-unique id.
+// It is the last step of CreateReminder's pipeline that can still shape
+// what gets stored, so anything a later step in that sequence needs to
+// see must be folded in here rather than after the save.
+func (s *Service) newReminder(id, task string, dueAt time.Time, in CreateInput) *reminder.Reminder {
+	return &reminder.Reminder{
 		ID:             id,
 		Text:           task,
 		DueAt:          dueAt,
@@ -212,12 +250,6 @@ func (s *Service) CreateReminder(in CreateInput) (*reminder.Reminder, error) {
 		Priority:       in.Priority,
 		Click:          in.Click,
 	}
-
-	if err := s.store.SaveReminder(*rem); err != nil {
-		return nil, fmt.Errorf("failed to store reminder: %w", err)
-	}
-
-	return rem, nil
 }
 
 // parseDueTime finds the due time in text and reports which part of it
