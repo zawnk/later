@@ -168,9 +168,9 @@ Grab a binary from the [Releases page](https://github.com/zawnk/later/releases?q
 Docker-image release):
 
 ```
-curl -LO https://github.com/zawnk/later/releases/download/later/v0.2.0/later_v0.2.0_linux_amd64
-chmod +x later_v0.2.0_linux_amd64
-sudo mv later_v0.2.0_linux_amd64 /usr/local/bin/later
+curl -LO https://github.com/zawnk/later/releases/download/later/v0.3.0/later_v0.3.0_linux_amd64
+chmod +x later_v0.3.0_linux_amd64
+sudo mv later_v0.3.0_linux_amd64 /usr/local/bin/later
 ```
 
 (swap `amd64` for `arm64` if that's your machine; a `later_checksums.txt`
