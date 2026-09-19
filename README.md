@@ -47,6 +47,10 @@ If you're already running ntfy, that's the only other piece you need - just plai
 - **Tag or prioritize from your phone** - add `#tag` / `!high` to the end
   of a message and it carries through (`"call mom tomorrow #family
   !high"`).
+- **Stubs for the reminders you set constantly** - define `:laundry`
+  once (`later stub set laundry in 2h sort laundry`, or text
+  `/stub laundry ...`), then set it from any device with `later :laundry`
+  or a text saying `:laundry`. See [Stubs](#stubs).
 - **Real push notifications** - tags, priority, and a tappable link if you
   want one, same as any other ntfy notification. If a reminder's been
   sitting a while before it fires (say the server was briefly down), the
@@ -78,11 +82,12 @@ If you're already running ntfy, that's the only other piece you need - just plai
 - **A real HTTP API** - create, list, cancel, and postpone reminders from
   anything that can make an HTTP request. Token-based auth, and the list
   endpoints support the same sort/limit/search options the CLI uses.
-- **No database** - just two plain JSON files (`pending.json`,
-  `archive.json`) you can read, edit, `jq` through, or back up by hand.
+- **No database** - just plain JSON files (`pending.json`,
+  `archive.json`, and `stubs.json` once you define a stub) you can read,
+  edit, `jq` through, or back up by hand.
   Nothing to migrate, nothing opaque. Writes are atomic (temp file +
   fsync + rename), so a crash or power loss mid-write can't corrupt
-  either file.
+  any of them.
 - **Docker-ready** - image on GHCR for `amd64` and `arm64`, built on
   `distroless/static` with a real healthcheck baked in (`later
   healthcheck` / `GET /healthz`, no token needed). Timezone data is
@@ -136,7 +141,8 @@ auth_tokens:
 ```
 
 `./data` on the host holds both `config.yaml` and the state files
-(`pending.json`, `archive.json`) - one directory, everything in it.
+(`pending.json`, `archive.json`, and `stubs.json` once you define a
+stub) - one directory, everything in it.
 
 See [`data/config.yaml.example`](data/config.yaml.example) for every
 option, including optional ones like `default_outbound`.
@@ -190,14 +196,18 @@ later_token = tk_replace_this_with_a_real_token_at_least_16_chars
 and override the config file.)
 
 ```
-later in 3d buy milk                    # create - no quotes needed
-later list                              # pending reminders, soonest first
-later archive --limit 10                # last 10 fired reminders
-later search milk                       # substring search, pending by default
-later next                              # what's coming up next
-later cancel last                       # cancel the one you just created
-later postpone last 1h                  # reschedule a fired reminder in an hour
-later test parse tomorrow at 2am sleep  # preview parsing, creates nothing
+later in 3d buy milk                         # create - no quotes needed
+later list                                   # pending reminders, soonest first
+later archive --limit 10                     # last 10 fired reminders
+later search milk                            # substring search, pending by default
+later next                                   # what's coming up next
+later cancel last                            # cancel the one you just created
+later postpone last 1h                       # reschedule a fired reminder in an hour
+later test parse tomorrow at 2am sleep       # preview parsing, creates nothing
+later :laundry                               # invoke a stub - plain free text
+later stub list                              # every stub and what it expands to
+later stub set laundry in 2h sort laundry    # define one (or replace it)
+later stub del laundry                       # delete it (rm works too)
 ```
 
 Add `--json` to any read command for machine-readable output.
@@ -259,6 +269,82 @@ call mom tomorrow #family !high
 water the office plants next monday #chores
 ```
 
+## Stubs
+
+Some reminders get set over and over - same text, same duration, several
+times a week. A **stub** is a named shorthand for one of them, invoked
+with a leading `:`.
+
+Define it once, from the terminal:
+
+```
+later stub set hockey in 17m intermission is over --tag hockey --priority high
+```
+
+(`--tag`, `--priority` and `--click` are the same notification flags
+reminder creation takes. There is no `--topic`, for the reason in the
+last bullet below.)
+
+...or by text via ntfy, where a trailing `#tag` / `!priority` works exactly as
+it does on a reminder:
+
+```
+/stub hockey in 17m intermission is over #hockey !high
+```
+
+Then set it, from either, with the same few keystrokes:
+
+```
+later :hockey        # from the CLI
+:hockey              # texted to your inbound topic
+```
+
+Both create "intermission is over", due in 17 minutes, tagged `hockey` at
+high priority - the tags and priority come from the stub itself.
+
+Trailing text is appended to the stub's own text, so `:hockey overtime`
+schedules "intermission is over overtime" - still in 17 minutes. A
+priority or click given at invocation time overrides the stub's; tags
+from both are merged.
+
+Managing them:
+
+```
+later stub list            # or text /stubs
+later stub del hockey      # or text /unstub hockey
+later test parse :hockey   # preview the expansion, creates nothing
+```
+
+Definitions live in `stubs.json`, alongside `pending.json` and
+`archive.json` in `./data` - a plain JSON map, created the first time you
+define a stub, readable and hand-editable like the rest. There is no
+config key for it.
+
+A name must be lowercase and letter-initial (`[a-z][a-z0-9_-]*`).
+A stub's text can't itself be a stub invocation: expansion happens once,
+so `:a` expanding to `:b` is rejected when you define it.
+
+The per-device alternatives are good and still recommended: a shell
+alias (`alias hockey='later in 17m intermission is over'`), a phone Shortcut
+POSTing a fixed body to `/reminders` (one tap - faster than typing
+`:hockey` ever will be), or keyboard text replacement. What a stub adds
+over them is *one* definition, invoked identically from every device,
+including devices you can't install anything on. If the alternative is
+maintaining the same shortcut in two places and watching them drift,
+that's the case for it. Its main purpose is convenience, not capability.
+
+Two things worth knowing:
+
+- **Clock-time stubs go stale during the day.** A stub reading `at 5pm
+  start dinner` defines fine at any hour, but invoking it only works
+  before 5pm - after that it's a past-due rejection, exactly as the same
+  text typed as a plain reminder would be. It just bites more often,
+  because a stub is text you re-run daily. Duration stubs (`in 15m`)
+  never go stale.
+- **Routing can't be stored in a stub.** There's no outbound topic
+  field. Destinations stay with your token and inbound config, which is
+  also where they're scoped - stubs themselves are global.
+
 ## HTTP API
 
 Token-based auth (`Authorization: Bearer <token>`), JSON in and out.
@@ -274,6 +360,9 @@ Token-based auth (`Authorization: Bearer <token>`), JSON in and out.
 | `DELETE` | `/reminders/{id}` | Cancel a pending reminder. |
 | `POST` | `/reminders/{id}/postpone?duration=1h` | `duration` is a query param - compact or natural language. |
 | `POST` | `/reminders/{id}/dismiss` | Clears the fired notification across every subscribed device (ntfy server-side, not just the calling client). `{id}` must be archived. |
+| `GET` | `/stubs` | List every stub, alphabetically. Each object carries its own `name`. |
+| `PUT` | `/stubs/{name}` | Create or replace a stub. Body: `{"text": "...", "tags": [...], "priority": "...", "click": "..."}` - only `text` is required. See [Stubs](#stubs) for the name rule. |
+| `DELETE` | `/stubs/{name}` | Delete a stub. |
 | `POST` | `/test/parse` | Preview parsing. Body: `{"text": "..."}`. Creates nothing. |
 | `GET` | `/healthz` | No token needed. |
 

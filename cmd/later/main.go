@@ -31,6 +31,7 @@ type CLI struct {
 	Last        LastCmd        `cmd:"" help:"Show the most recently fired reminder."`
 	Cancel      CancelCmd      `cmd:"" help:"Cancel a pending reminder."`
 	Postpone    PostponeCmd    `cmd:"" help:"Re-schedule a fired reminder."`
+	Stub        StubCmd        `cmd:"" help:"Define, list and delete stubs -- named shorthands invoked as free text: later :<stubname>"`
 	Test        TestCmd        `cmd:"" help:"Diagnostic commands that don't create or change anything."`
 	Healthcheck HealthcheckCmd `cmd:"" help:"Probe the server's /healthz; exit 0 if healthy. Needs no token -- usable as a Docker HEALTHCHECK."`
 }
@@ -130,6 +131,151 @@ func (c *CreateCmd) Run(a *app) error {
 		return nil
 	}
 	printSinglePendingVerbose(a.out, *rem)
+	return nil
+}
+
+// StubCmd groups the stub management verbs, mirroring the nesting the
+// diagnostic commands already use. Invoking a stub needs nothing here:
+// `later :<stubname>` is free text routed to create.
+type StubCmd struct {
+	List StubListCmd `cmd:"" help:"List every stub and the text it expands to."`
+	Set  StubSetCmd  `cmd:"" help:"Create or replace a stub."`
+	Del  StubDelCmd  `cmd:"" aliases:"rm" help:"Delete a stub."`
+}
+
+type StubListCmd struct{}
+
+func (c *StubListCmd) Run(a *app) error {
+	cl, err := a.client()
+	if err != nil {
+		return err
+	}
+	stubs, err := cl.listStubs()
+	if err != nil {
+		return err
+	}
+
+	if a.json {
+		if stubs == nil {
+			stubs = []reminder.NamedStub{}
+		}
+		return a.printJSON(stubs)
+	}
+	if len(stubs) == 0 {
+		fmt.Fprintln(a.out, "no stubs defined")
+		return nil
+	}
+	printStubs(a.out, stubs)
+	return nil
+}
+
+// printStubs renders one stub per line (invocation name, then the text
+// it expands to) with the tags and priority columns present only when
+// some stub carries them, the same way the pending list drops columns
+// nothing fills. The name is printed with its `:` sigil so the line
+// doubles as the command that invokes it.
+func printStubs(w io.Writer, stubs []reminder.NamedStub) {
+	showTags, showPriority := false, false
+	for _, s := range stubs {
+		showTags = showTags || len(s.Tags) > 0
+		showPriority = showPriority || s.Priority != ""
+	}
+
+	nameWidth, tagsWidth, priorityWidth := 0, 0, 0
+	for _, s := range stubs {
+		nameWidth = max(nameWidth, utf8.RuneCountInString(s.Name)+1)
+		tagsWidth = max(tagsWidth, utf8.RuneCountInString(tagsCell(s.Tags)))
+		priorityWidth = max(priorityWidth, utf8.RuneCountInString(priorityCell(s.Priority)))
+	}
+
+	for _, s := range stubs {
+		fmt.Fprintf(w, "%-*s", nameWidth, ":"+s.Name)
+		if showTags {
+			fmt.Fprintf(w, "  %-*s", tagsWidth, tagsCell(s.Tags))
+		}
+		if showPriority {
+			fmt.Fprintf(w, "  %-*s", priorityWidth, priorityCell(s.Priority))
+		}
+		fmt.Fprintf(w, "  %s\n", s.Text)
+	}
+}
+
+// StubSetCmd takes the notification options as flags
+// There is no --topic: a stub cannot carry outbound
+// topics, since topic resolution happens per token before the service
+// is reached and any stored topics would be discarded.
+type StubSetCmd struct {
+	Name     string   `arg:"" help:"Stub name, lowercase and letter-initial, with or without the : sigil. Invoked as free text: later :<stubname>"`
+	Text     []string `arg:"" help:"The text the stub expands to, e.g.: in 15m intermission over"`
+	Tag      []string `help:"ntfy tag(s) the expansion carries, repeatable or comma-separated." placeholder:"TAG"`
+	Priority string   `short:"p" help:"Notification priority: min, low, default, high, urgent, max." enum:",min,low,default,high,urgent,max" default:""`
+	Click    string   `help:"URL the ntfy client opens when the notification is tapped." placeholder:"URL"`
+}
+
+func (c *StubSetCmd) Run(a *app) error {
+	cl, err := a.client()
+	if err != nil {
+		return err
+	}
+
+	stored, err := cl.setStub(trimStubSigil(c.Name), reminder.Stub{
+		Text:     strings.Join(c.Text, " "),
+		Tags:     c.Tag,
+		Priority: c.Priority,
+		Click:    c.Click,
+	})
+	if err != nil {
+		return err
+	}
+
+	if a.json {
+		return a.printJSON(stored)
+	}
+	printStubSet(a.out, *stored)
+	return nil
+}
+
+// printStubSet confirms one stored stub.
+func printStubSet(w io.Writer, s reminder.NamedStub) {
+	fmt.Fprintf(w, "set :%s", s.Name)
+	if len(s.Tags) > 0 {
+		fmt.Fprintf(w, "  %s", tagsCell(s.Tags))
+	}
+	if s.Priority != "" {
+		fmt.Fprintf(w, "  %s", priorityCell(s.Priority))
+	}
+	fmt.Fprintf(w, "  %s", s.Text)
+	if s.Click != "" {
+		fmt.Fprintf(w, " (click %s)", s.Click)
+	}
+	fmt.Fprintln(w)
+}
+
+// trimStubSigil strips the invocation sigil from a name typed with it. The
+// stubs themselves are stored unprefixed, but `stub list` prints `:name`
+// so the line doubles as the invocation, and a name pasted back from
+// that output has to work.
+func trimStubSigil(name string) string {
+	return strings.TrimPrefix(name, ":")
+}
+
+type StubDelCmd struct {
+	Name string `arg:"" help:"Name of the stub to delete, with or without the : sigil."`
+}
+
+func (c *StubDelCmd) Run(a *app) error {
+	cl, err := a.client()
+	if err != nil {
+		return err
+	}
+	name := trimStubSigil(c.Name)
+	if err := cl.deleteStub(name); err != nil {
+		return err
+	}
+	if a.json {
+		return nil
+	}
+	fmt.Fprintf(a.out, "stub :%s deleted\n", name)
 	return nil
 }
 
@@ -276,10 +422,10 @@ func printPendingEntries(w io.Writer, reminders []reminder.Reminder, by string, 
 		for i, r := range b.items {
 			row := pendingRow{id: r.ID, due: dueCell(r), text: r.Text}
 			if showPriority {
-				row.priority = priorityCell(r)
+				row.priority = priorityCell(r.Priority)
 			}
 			if showTags {
-				row.tags = tagsCell(r)
+				row.tags = tagsCell(r.Tags)
 			}
 			if showTopics {
 				row.topics = topicsCell(r)
@@ -324,10 +470,10 @@ func printPendingEntries(w io.Writer, reminders []reminder.Reminder, by string, 
 func printSinglePendingVerbose(w io.Writer, r reminder.Reminder) {
 	fmt.Fprintf(w, "%s  %s", r.ID, dueCell(r))
 	if r.Priority != "" {
-		fmt.Fprintf(w, "  %s", priorityCell(r))
+		fmt.Fprintf(w, "  %s", priorityCell(r.Priority))
 	}
 	if len(r.Tags) > 0 {
-		fmt.Fprintf(w, "  %s", tagsCell(r))
+		fmt.Fprintf(w, "  %s", tagsCell(r.Tags))
 	}
 	if len(r.OutboundTopics) > 0 {
 		fmt.Fprintf(w, "  %s", topicsCell(r))
@@ -439,19 +585,19 @@ func dueCell(r reminder.Reminder) string {
 	}
 }
 
-func priorityCell(r reminder.Reminder) string {
-	if r.Priority == "" {
+func priorityCell(priority string) string {
+	if priority == "" {
 		return "-"
 	}
-	return r.Priority
+	return priority
 }
 
-func tagsCell(r reminder.Reminder) string {
-	if len(r.Tags) == 0 {
+func tagsCell(tags []string) string {
+	if len(tags) == 0 {
 		return "-"
 	}
-	parts := make([]string, len(r.Tags))
-	for i, t := range r.Tags {
+	parts := make([]string, len(tags))
+	for i, t := range tags {
 		parts[i] = "#" + t
 	}
 	return strings.Join(parts, " ")

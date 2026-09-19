@@ -57,3 +57,29 @@ func DedupeStrings(items []string) []string {
 	}
 	return result
 }
+
+// Stub is a named, reusable reminder-creation template: the
+// service-owned fields of a creation input, snake_cased to match the API
+// body. OutboundTopics is deliberately absent - topics are per-token and
+// always concrete by the time a stub is resolved, so a stub could never
+// contribute one.
+//
+// The fields restate service.CreateInput rather than embedding it because
+// the import only runs one way: service imports reminder, never the
+// reverse. A field added to CreateInput has to be added here too.
+type Stub struct {
+	Text     string   `json:"text"`
+	Tags     []string `json:"tags,omitempty"`
+	Priority string   `json:"priority,omitempty"`
+	Click    string   `json:"click,omitempty"`
+}
+
+// NamedStub is a Stub carrying the name it is stored under. The stubs
+// file is a map keyed by name, which gives name-uniqueness structurally
+// but leaves the name outside the value; every surface that hands a
+// stub back to a caller has to put it back in. The embedded Stub
+// inlines its own fields, so the JSON is one flat object.
+type NamedStub struct {
+	Name string `json:"name"`
+	Stub
+}

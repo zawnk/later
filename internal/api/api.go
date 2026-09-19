@@ -45,6 +45,9 @@ func (a *API) Routes() *http.ServeMux {
 	mux.HandleFunc("DELETE /reminders/{id}", a.auth(a.cancelReminder, ""))
 	mux.HandleFunc("POST /reminders/{id}/postpone", a.auth(a.postponeReminder, "postpone"))
 	mux.HandleFunc("POST /reminders/{id}/dismiss", a.auth(a.dismissReminder, "clear"))
+	mux.HandleFunc("GET /stubs", a.auth(a.listStubs, ""))
+	mux.HandleFunc("PUT /stubs/{name}", a.auth(a.setStub, ""))
+	mux.HandleFunc("DELETE /stubs/{name}", a.auth(a.deleteStub, ""))
 	mux.HandleFunc("POST /test/parse", a.auth(a.testParse, ""))
 	mux.HandleFunc("GET /healthz", a.healthz)
 
@@ -361,8 +364,69 @@ func (a *API) dismissReminder(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// testParse previews how text would be parsed by CreateReminder - task
-// text and resolved due time - without creating or storing anything.
+// listStubs returns every defined stub as an array of flat objects
+// each carrying its own name, alphabetically - the same shape and the
+// same deterministic ordering GET /reminders has, which a JSON object
+// keyed by name could not give.
+//
+// There is no GET /stubs/{name}: the whole file is tiny, so the list
+// already answers it.
+func (a *API) listStubs(w http.ResponseWriter, r *http.Request) {
+	stubs, err := a.svc.ListStubs()
+	if err != nil {
+		writeServiceError(w, err, "failed to load stubs")
+		return
+	}
+	writeJsonResponse(w, http.StatusOK, stubs)
+}
+
+// setStub creates or replaces the stub named in the path. PUT rather
+// than POST because the name is the *client's* choice, so the client
+// already knows the URI - reminders POST because the server assigns the
+// id. That also makes the write idempotent, so there is no conflict
+// case to decide: the same write twice leaves the same one stub.
+//
+// The body is the stub itself, shaped like a create-reminder body minus
+// the fields a stub cannot carry, and it is validated on the way in:
+// anything that could never produce a reminder is a 400 here rather
+// than a failure on first invocation.
+func (a *API) setStub(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Text     string   `json:"text"`
+		Tags     []string `json:"tags"`
+		Priority string   `json:"priority"`
+		Click    string   `json:"click"`
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		writeJSONError(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	name := r.PathValue("name")
+	stub := reminder.Stub{Text: body.Text, Tags: body.Tags, Priority: body.Priority, Click: body.Click}
+	if _, err := a.svc.SetStub(name, stub); err != nil {
+		writeServiceError(w, err, "failed to store stub")
+		return
+	}
+
+	writeJsonResponse(w, http.StatusOK, reminder.NamedStub{Name: name, Stub: stub})
+}
+
+func (a *API) deleteStub(w http.ResponseWriter, r *http.Request) {
+	if err := a.svc.DeleteStub(r.PathValue("name")); err != nil {
+		writeServiceError(w, err, "failed to delete stub")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// testParse previews what CreateReminder would schedule for text - task
+// text and resolved due time, with any stub invocation expanded first -
+// without creating or storing anything.
 func (a *API) testParse(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Text string `json:"text"`
@@ -376,7 +440,7 @@ func (a *API) testParse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, due, err := a.svc.ParseReminderText(body.Text)
+	task, due, err := a.svc.PreviewReminderText(body.Text)
 	if err != nil {
 		writeServiceError(w, err, "failed to parse")
 		return

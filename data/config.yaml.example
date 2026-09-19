@@ -1,7 +1,7 @@
 server:
   port: 8080
   base_url: https://later.domain.com # used as the callback url on notification action buttons https://docs.ntfy.sh/publish/#send-http-request
-  data_dir: ./data # path for the reminder data files
+  data_dir: ./data # path for the state files: pending.json, archive.json and stubs.json
 
 ntfy:
   server: https://ntfy.domain.com # used as the server for your ntfy

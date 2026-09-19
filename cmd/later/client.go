@@ -218,3 +218,39 @@ func (c *client) postpone(id, duration string) (*reminder.Reminder, error) {
 	}
 	return &rem, nil
 }
+
+func (c *client) listStubs() ([]reminder.NamedStub, error) {
+	var stubs []reminder.NamedStub
+	err := c.getJSON("/stubs", &stubs)
+	return stubs, err
+}
+
+// setStub creates or replaces the stub named name. The name is the
+// client's choice, so the endpoint is a PUT on the name's own URI and
+// the write is idempotent.
+func (c *client) setStub(name string, stub reminder.Stub) (*reminder.NamedStub, error) {
+	payload, err := json.Marshal(stub)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.do(http.MethodPut, "/stubs/"+url.PathEscape(name), bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var stored reminder.NamedStub
+	if err := json.NewDecoder(resp.Body).Decode(&stored); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &stored, nil
+}
+
+func (c *client) deleteStub(name string) error {
+	resp, err := c.do(http.MethodDelete, "/stubs/"+url.PathEscape(name), nil)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
+}

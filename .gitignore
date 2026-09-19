@@ -36,6 +36,7 @@ config.yaml
 later
 pending.json
 archive.json
+stubs.json
 !later/
 /docs
 

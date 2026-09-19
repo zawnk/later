@@ -1,9 +1,12 @@
 package store
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -200,5 +203,311 @@ func TestNew_CorruptedPendingFile(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), pendingPath) {
 		t.Errorf("New() error = %q, want it to mention the file path %q", err.Error(), pendingPath)
+	}
+}
+
+func TestLoadStubs_ReadsDefinitions(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(dir)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	contents := `{
+  "hockey": {"text": "in 15m back to the game", "tags": ["hockey"], "priority": "high", "click": "https://example.com/game"},
+  "laundry": {"text": "in 45m move the laundry"}
+}`
+	if err := os.WriteFile(filepath.Join(dir, "stubs.json"), []byte(contents), 0600); err != nil {
+		t.Fatalf("failed to write stubs file: %v", err)
+	}
+
+	stubs, err := s.LoadStubs()
+	if err != nil {
+		t.Fatalf("LoadStubs() error = %v", err)
+	}
+
+	if len(stubs) != 2 {
+		t.Fatalf("LoadStubs() returned %d stubs, want 2", len(stubs))
+	}
+
+	hockey := stubs["hockey"]
+	if hockey.Text != "in 15m back to the game" {
+		t.Errorf("hockey text = %q, want %q", hockey.Text, "in 15m back to the game")
+	}
+	if len(hockey.Tags) != 1 || hockey.Tags[0] != "hockey" {
+		t.Errorf("hockey tags = %v, want [hockey]", hockey.Tags)
+	}
+	if hockey.Priority != "high" {
+		t.Errorf("hockey priority = %q, want %q", hockey.Priority, "high")
+	}
+	if hockey.Click != "https://example.com/game" {
+		t.Errorf("hockey click = %q, want %q", hockey.Click, "https://example.com/game")
+	}
+
+	if stubs["laundry"].Text != "in 45m move the laundry" {
+		t.Errorf("laundry text = %q, want %q", stubs["laundry"].Text, "in 45m move the laundry")
+	}
+}
+
+func TestLoadStubs_MissingFile(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(dir)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	stubs, err := s.LoadStubs()
+	if err != nil {
+		t.Fatalf("LoadStubs() error = %v, want no error for a missing file", err)
+	}
+	if len(stubs) != 0 {
+		t.Errorf("LoadStubs() returned %d stubs, want 0", len(stubs))
+	}
+
+	stubsPath := filepath.Join(dir, "stubs.json")
+	if _, err := os.Stat(stubsPath); !os.IsNotExist(err) {
+		t.Errorf("reading created %q; the file must not be created merely by reading", stubsPath)
+	}
+}
+
+func TestLoadStubs_EmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(dir)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "stubs.json"), nil, 0600); err != nil {
+		t.Fatalf("failed to write empty stubs file: %v", err)
+	}
+
+	stubs, err := s.LoadStubs()
+	if err != nil {
+		t.Fatalf("LoadStubs() error = %v, want no error for an empty file", err)
+	}
+	if len(stubs) != 0 {
+		t.Errorf("LoadStubs() returned %d stubs, want 0", len(stubs))
+	}
+}
+
+func TestLoadStubs_MalformedFile(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(dir)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	stubsPath := filepath.Join(dir, "stubs.json")
+	if err := os.WriteFile(stubsPath, []byte("{not valid json"), 0600); err != nil {
+		t.Fatalf("failed to corrupt stubs file: %v", err)
+	}
+
+	stubs, err := s.LoadStubs()
+	if err == nil {
+		t.Fatal("LoadStubs() error = nil, want an error for malformed JSON")
+	}
+	if !strings.Contains(err.Error(), stubsPath) {
+		t.Errorf("LoadStubs() error = %q, want it to name the file path %q", err.Error(), stubsPath)
+	}
+	if stubs != nil {
+		t.Errorf("LoadStubs() = %v, want nil map alongside the error", stubs)
+	}
+}
+
+func TestLoadStubs_RereadsOnEveryCall(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(dir)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	stubsPath := filepath.Join(dir, "stubs.json")
+	if err := os.WriteFile(stubsPath, []byte(`{"hockey": {"text": "in 15m back to the game"}}`), 0600); err != nil {
+		t.Fatalf("failed to write stubs file: %v", err)
+	}
+	if _, err := s.LoadStubs(); err != nil {
+		t.Fatalf("LoadStubs() error = %v", err)
+	}
+
+	if err := os.WriteFile(stubsPath, []byte(`{"laundry": {"text": "in 45m move the laundry"}}`), 0600); err != nil {
+		t.Fatalf("failed to rewrite stubs file: %v", err)
+	}
+
+	stubs, err := s.LoadStubs()
+	if err != nil {
+		t.Fatalf("LoadStubs() (second call) error = %v", err)
+	}
+	if _, ok := stubs["hockey"]; ok {
+		t.Error("LoadStubs() still returned the edited-away stub; it must re-read the file on every call")
+	}
+	if stubs["laundry"].Text != "in 45m move the laundry" {
+		t.Errorf("laundry text = %q, want the hand-edited value", stubs["laundry"].Text)
+	}
+}
+
+func TestSetStub_CreatesTheFileAndRoundtrips(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(dir)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	stub := reminder.Stub{
+		Text:     "in 15m back to the game",
+		Tags:     []string{"hockey"},
+		Priority: "high",
+		Click:    "https://example.com/game",
+	}
+	if _, err := s.SetStub("hockey", stub); err != nil {
+		t.Fatalf("SetStub() error = %v", err)
+	}
+
+	stubsPath := filepath.Join(dir, "stubs.json")
+	if _, err := os.Stat(stubsPath); err != nil {
+		t.Fatalf("stat %q after the first write: %v; the file must be created on first write", stubsPath, err)
+	}
+
+	stubs, err := s.LoadStubs()
+	if err != nil {
+		t.Fatalf("LoadStubs() error = %v", err)
+	}
+	if !reflect.DeepEqual(stubs["hockey"], stub) {
+		t.Errorf("LoadStubs()[\"hockey\"] = %+v, want %+v", stubs["hockey"], stub)
+	}
+}
+
+func TestSetStub_ReplacesAnExistingDefinition(t *testing.T) {
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := s.SetStub("hockey", reminder.Stub{Text: "in 15m back to the game", Tags: []string{"hockey"}}); err != nil {
+		t.Fatalf("SetStub() error = %v", err)
+	}
+	if _, err := s.SetStub("hockey", reminder.Stub{Text: "in 20m back to the game"}); err != nil {
+		t.Fatalf("SetStub() (replacing) error = %v", err)
+	}
+
+	stubs, err := s.LoadStubs()
+	if err != nil {
+		t.Fatalf("LoadStubs() error = %v", err)
+	}
+	if len(stubs) != 1 {
+		t.Fatalf("LoadStubs() returned %d stubs, want 1 - a replace must not add a second entry", len(stubs))
+	}
+	if got := stubs["hockey"]; got.Text != "in 20m back to the game" || got.Tags != nil {
+		t.Errorf("hockey = %+v, want the replacement wholesale, carrying none of the old tags", got)
+	}
+}
+
+func TestDeleteStub(t *testing.T) {
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := s.SetStub("hockey", reminder.Stub{Text: "in 15m back to the game"}); err != nil {
+		t.Fatalf("SetStub() error = %v", err)
+	}
+	if _, err := s.SetStub("laundry", reminder.Stub{Text: "in 45m move the laundry"}); err != nil {
+		t.Fatalf("SetStub() error = %v", err)
+	}
+
+	found, err := s.DeleteStub("hockey")
+	if err != nil {
+		t.Fatalf("DeleteStub() error = %v", err)
+	}
+	if !found {
+		t.Error("DeleteStub(\"hockey\") found = false, want true")
+	}
+
+	stubs, err := s.LoadStubs()
+	if err != nil {
+		t.Fatalf("LoadStubs() error = %v", err)
+	}
+	if _, ok := stubs["hockey"]; ok {
+		t.Error("LoadStubs() still holds the deleted stub")
+	}
+	if stubs["laundry"].Text != "in 45m move the laundry" {
+		t.Errorf("laundry = %+v, want the untouched sibling to survive the delete", stubs["laundry"])
+	}
+
+	found, err = s.DeleteStub("hockey")
+	if err != nil {
+		t.Fatalf("DeleteStub() (second time) error = %v", err)
+	}
+	if found {
+		t.Error("DeleteStub(\"hockey\") found = true on an absent stub, want false")
+	}
+}
+
+// TestSetStub_ConcurrentWritesToDifferentNames pins the reason the lock
+// spans the read-modify-write rather than the write alone: every write
+// rewrites the whole map, so a narrower lock would let two writers read
+// the same map and have the later one drop the earlier one's stub. Run
+// under -race as well as for the surviving-entry count.
+func TestSetStub_ConcurrentWritesToDifferentNames(t *testing.T) {
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	const writers = 8
+	var wg sync.WaitGroup
+	errs := make([]error, writers)
+	for i := range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, errs[i] = s.SetStub(fmt.Sprintf("stub%d", i), reminder.Stub{Text: fmt.Sprintf("in %dm do a thing", i+1)})
+		}()
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("SetStub(stub%d) error = %v", i, err)
+		}
+	}
+
+	stubs, err := s.LoadStubs()
+	if err != nil {
+		t.Fatalf("LoadStubs() error = %v", err)
+	}
+	if len(stubs) != writers {
+		t.Fatalf("LoadStubs() returned %d stubs, want %d - a concurrent write to a different name was lost", len(stubs), writers)
+	}
+	for i := range writers {
+		name := fmt.Sprintf("stub%d", i)
+		if want := fmt.Sprintf("in %dm do a thing", i+1); stubs[name].Text != want {
+			t.Errorf("%s text = %q, want %q", name, stubs[name].Text, want)
+		}
+	}
+}
+
+// TestSetStub_ReportsWhetherItCreated pins the distinction the ntfy
+// "/stub" confirmation needs: a write under a fresh name created, a
+// write over an existing one replaced.
+func TestSetStub_ReportsWhetherItCreated(t *testing.T) {
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	created, err := s.SetStub("hockey", reminder.Stub{Text: "in 15m back to the game"})
+	if err != nil {
+		t.Fatalf("SetStub() error = %v", err)
+	}
+	if !created {
+		t.Error("SetStub() created = false for a name not yet defined, want true")
+	}
+
+	created, err = s.SetStub("hockey", reminder.Stub{Text: "in 20m back to the game"})
+	if err != nil {
+		t.Fatalf("SetStub() (replacing) error = %v", err)
+	}
+	if created {
+		t.Error("SetStub() created = true when replacing an existing definition, want false")
 	}
 }

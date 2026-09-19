@@ -2,6 +2,7 @@ package service
 
 import (
 	"errors"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -16,6 +17,8 @@ type mockStore struct {
 	saveErr    error
 	archive    []reminder.ArchivedReminder
 	archiveErr error
+	stubs      map[string]reminder.Stub
+	stubsErr   error
 }
 
 func (m *mockStore) SaveReminder(r reminder.Reminder) error {
@@ -31,6 +34,34 @@ func (m *mockStore) ListArchive() ([]reminder.ArchivedReminder, error) {
 	return m.archive, m.archiveErr
 }
 func (m *mockStore) CancelReminder(id string) (bool, error) { return false, nil }
+func (m *mockStore) SetStub(name string, stub reminder.Stub) (bool, error) {
+	if m.stubsErr != nil {
+		return false, m.stubsErr
+	}
+	if m.stubs == nil {
+		m.stubs = map[string]reminder.Stub{}
+	}
+	_, existed := m.stubs[name]
+	m.stubs[name] = stub
+	return !existed, nil
+}
+
+func (m *mockStore) DeleteStub(name string) (bool, error) {
+	if m.stubsErr != nil {
+		return false, m.stubsErr
+	}
+	if _, ok := m.stubs[name]; !ok {
+		return false, nil
+	}
+	delete(m.stubs, name)
+	return true, nil
+}
+func (m *mockStore) LoadStubs() (map[string]reminder.Stub, error) {
+	if m.stubsErr != nil {
+		return nil, m.stubsErr
+	}
+	return m.stubs, nil
+}
 
 func TestCollapseWhitespace(t *testing.T) {
 	tests := []struct {
@@ -736,6 +767,22 @@ func TestCreateReminder_NotificationOptionsValidation(t *testing.T) {
 	}
 }
 
+func TestCreateReminder_ReportsInvalidPriorityOverUnparseableText(t *testing.T) {
+	svc := New(&mockStore{})
+	svc.now = func() time.Time { return time.Date(2026, 6, 15, 9, 0, 0, 0, time.Local) }
+
+	_, err := svc.CreateReminder(CreateInput{Text: "no time reference here", Priority: "hgih"})
+	if err == nil {
+		t.Fatal("CreateReminder() with an invalid priority and unparseable text error = nil, want an error")
+	}
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("CreateReminder() error = %v, want it to wrap ErrInvalidInput", err)
+	}
+	if !strings.Contains(err.Error(), "invalid priority") {
+		t.Errorf("CreateReminder() error = %v, want the invalid-priority error: everything ntfy would reject is rejected before the text is parsed", err)
+	}
+}
+
 func TestNext(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -1219,4 +1266,600 @@ func TestGetArchived(t *testing.T) {
 			t.Fatal("GetArchived() error = nil, want the archive load error surfaced")
 		}
 	})
+}
+
+// stubNow is the clock every stub test pins, so an "in 15m" stub has one
+// knowable due time.
+var stubNow = time.Date(2026, 6, 15, 9, 0, 0, 0, time.Local)
+
+// newStubService builds a service over a mockStore holding stubs, with
+// the clock pinned to stubNow.
+func newStubService(store *mockStore) *Service {
+	svc := New(store)
+	svc.now = func() time.Time { return stubNow }
+	return svc
+}
+
+func TestCreateReminder_InvokingAStubCarriesItsFields(t *testing.T) {
+	store := &mockStore{stubs: map[string]reminder.Stub{
+		"hockey": {
+			Text:     "in 15m back to the game",
+			Tags:     []string{"hockey"},
+			Priority: "high",
+			Click:    "https://example.com/game",
+		},
+	}}
+	svc := newStubService(store)
+
+	rem, err := svc.CreateReminder(CreateInput{Text: ":hockey"})
+	if err != nil {
+		t.Fatalf("CreateReminder(\":hockey\") error = %v", err)
+	}
+
+	if rem.Text != "back to the game" {
+		t.Errorf("CreateReminder() Text = %q, want the stub's text with its time phrase consumed", rem.Text)
+	}
+	want := stubNow.Add(15 * time.Minute)
+	if !rem.DueAt.Equal(want) {
+		t.Errorf("CreateReminder() DueAt = %v, want %v", rem.DueAt, want)
+	}
+	if !slices.Equal(rem.Tags, []string{"hockey"}) {
+		t.Errorf("CreateReminder() Tags = %v, want [hockey]", rem.Tags)
+	}
+	if rem.Priority != "high" {
+		t.Errorf("CreateReminder() Priority = %q, want %q", rem.Priority, "high")
+	}
+	if rem.Click != "https://example.com/game" {
+		t.Errorf("CreateReminder() Click = %q, want the stub's click", rem.Click)
+	}
+	if len(store.saved) != 1 || store.saved[0].Text != "back to the game" {
+		t.Errorf("stored reminder = %+v, want the expanded reminder persisted", store.saved)
+	}
+}
+
+func TestCreateReminder_StubShapeDecidesInvocation(t *testing.T) {
+	tests := []struct {
+		name     string
+		text     string
+		wantTask string
+	}{
+		{"bare stub name", ":hockey", "back to the game"},
+		{"stub name with trailing text", ":hockey overtime", "back to the game overtime"},
+		{"capitalized stub name folds", ":HOCKEY", "back to the game"},
+		{"closed shortcode stays literal", ":warning: take out the trash in 2h", ":warning: take out the trash"},
+		{"digit-initial stays literal", ":30 past the hour in 2h", ":30 past the hour"},
+		{"a stub name that isn't the first word stays literal", "buy milk :hockey in 2h", "buy milk :hockey"},
+		{"single-letter stub name resolves", ":h", "back to the game"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := newStubService(&mockStore{stubs: map[string]reminder.Stub{
+				"hockey": {Text: "in 15m back to the game"},
+				"h":      {Text: "in 15m back to the game"},
+			}})
+
+			rem, err := svc.CreateReminder(CreateInput{Text: tt.text})
+			if err != nil {
+				t.Fatalf("CreateReminder(%q) error = %v", tt.text, err)
+			}
+			if rem.Text != tt.wantTask {
+				t.Errorf("CreateReminder(%q) Text = %q, want %q", tt.text, rem.Text, tt.wantTask)
+			}
+		})
+	}
+}
+
+func TestCreateReminder_LeadingEmoticonIsTreatedAsAStubName(t *testing.T) {
+	svc := newStubService(&mockStore{stubs: map[string]reminder.Stub{
+		"hockey": {Text: "in 15m back to the game"},
+	}})
+
+	_, err := svc.CreateReminder(CreateInput{Text: ":D party tomorrow at 8pm"})
+	if err == nil {
+		t.Fatal("CreateReminder(\":D party ...\") error = nil, want it read as an unknown stub named \"d\"")
+	}
+	if !strings.Contains(err.Error(), "unknown stub") {
+		t.Errorf("CreateReminder() error = %v, want a clear unknown-stub error", err)
+	}
+
+	// Anchored: an emoticon that is not the first word is untouched.
+	rem, err := svc.CreateReminder(CreateInput{Text: "party :D tomorrow at 8pm"})
+	if err != nil {
+		t.Fatalf("CreateReminder(\"party :D ...\") error = %v, want the emoticon left literal mid-text", err)
+	}
+	if rem.Text != "party :D" {
+		t.Errorf("CreateReminder() Text = %q, want %q", rem.Text, "party :D")
+	}
+}
+
+func TestCreateReminder_UnknownStub(t *testing.T) {
+	svc := newStubService(&mockStore{stubs: map[string]reminder.Stub{
+		"hockey": {Text: "in 15m back to the game"},
+	}})
+
+	_, err := svc.CreateReminder(CreateInput{Text: ":hokey"})
+	if err == nil {
+		t.Fatal("CreateReminder(\":hokey\") error = nil, want an unknown-stub error")
+	}
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("CreateReminder() error = %v, want it to wrap ErrInvalidInput", err)
+	}
+	if !strings.Contains(err.Error(), "unknown stub") || !strings.Contains(err.Error(), ":hokey") {
+		t.Errorf("CreateReminder() error = %v, want it to name the unknown stub rather than report a parse failure", err)
+	}
+
+	_, err = svc.CreateReminder(CreateInput{Text: ":HOKEY"})
+	if err == nil || !strings.Contains(err.Error(), ":HOKEY") {
+		t.Errorf("CreateReminder(\":HOKEY\") error = %v, want the name echoed as typed, not case-folded", err)
+	}
+}
+
+func TestCreateReminder_StubMergeSemantics(t *testing.T) {
+	stubs := map[string]reminder.Stub{
+		"hockey": {
+			Text:     "in 15m back to the game",
+			Tags:     []string{"hockey", "sports"},
+			Priority: "high",
+			Click:    "https://example.com/game",
+		},
+	}
+
+	t.Run("trailing text appends raw and the stub's own time wins", func(t *testing.T) {
+		svc := newStubService(&mockStore{stubs: stubs})
+
+		rem, err := svc.CreateReminder(CreateInput{Text: ":hockey in 30m"})
+		if err != nil {
+			t.Fatalf("CreateReminder() error = %v", err)
+		}
+		if rem.Text != "back to the game in 30m" {
+			t.Errorf("CreateReminder() Text = %q, want the trailing phrase kept as task text", rem.Text)
+		}
+		want := stubNow.Add(15 * time.Minute)
+		if !rem.DueAt.Equal(want) {
+			t.Errorf("CreateReminder() DueAt = %v, want %v - the stub's own time is leftmost and wins", rem.DueAt, want)
+		}
+	})
+
+	t.Run("request priority and click override the stub's", func(t *testing.T) {
+		svc := newStubService(&mockStore{stubs: stubs})
+
+		rem, err := svc.CreateReminder(CreateInput{
+			Text:     ":hockey",
+			Priority: "min",
+			Click:    "https://example.com/other",
+		})
+		if err != nil {
+			t.Fatalf("CreateReminder() error = %v", err)
+		}
+		if rem.Priority != "min" {
+			t.Errorf("CreateReminder() Priority = %q, want the request's %q", rem.Priority, "min")
+		}
+		if rem.Click != "https://example.com/other" {
+			t.Errorf("CreateReminder() Click = %q, want the request's", rem.Click)
+		}
+	})
+
+	t.Run("tags union and dedupe", func(t *testing.T) {
+		svc := newStubService(&mockStore{stubs: stubs})
+
+		rem, err := svc.CreateReminder(CreateInput{Text: ":hockey", Tags: []string{"sports", "evening"}})
+		if err != nil {
+			t.Fatalf("CreateReminder() error = %v", err)
+		}
+		want := []string{"hockey", "sports", "evening"}
+		if !slices.Equal(rem.Tags, want) {
+			t.Errorf("CreateReminder() Tags = %v, want %v", rem.Tags, want)
+		}
+	})
+}
+
+func TestCreateReminder_StubExpandsOnceAndDoesNotRecurse(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"body is a bare stub name", ":laundry"},
+		{"body is a stub name the parser would otherwise accept", ":laundry in 45m"},
+		{"body invokes the stub itself", ":hockey in 15m"},
+		{"body invokes a stub that doesn't exist", ":nosuchstub in 15m"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &mockStore{stubs: map[string]reminder.Stub{
+				"hockey":  {Text: tt.body},
+				"laundry": {Text: "in 45m move the laundry"},
+			}}
+			svc := newStubService(store)
+
+			_, err := svc.CreateReminder(CreateInput{Text: ":hockey"})
+			if err == nil {
+				t.Fatal("CreateReminder() error = nil, want the once-expanded text rejected rather than resolved a second time")
+			}
+			if !errors.Is(err, ErrInvalidInput) {
+				t.Errorf("CreateReminder() error = %v, want it to wrap ErrInvalidInput", err)
+			}
+			if strings.Contains(err.Error(), "move the laundry") {
+				t.Errorf("CreateReminder() error = %v, want no sign of a second expansion", err)
+			}
+			if len(store.saved) != 0 {
+				t.Errorf("stored %+v, want nothing stored for a stub that expands to a stub", store.saved)
+			}
+		})
+	}
+}
+
+func TestCreateReminder_StubResolutionPrecedesOptionValidation(t *testing.T) {
+	svc := newStubService(&mockStore{stubs: map[string]reminder.Stub{
+		"hockey": {Text: "in 15m back to the game", Priority: "hgih"},
+	}})
+
+	_, err := svc.CreateReminder(CreateInput{Text: ":hockey"})
+	if err == nil {
+		t.Fatal("CreateReminder() error = nil, want a hand-edited bad priority rejected at create time")
+	}
+	if !strings.Contains(err.Error(), "invalid priority") {
+		t.Errorf("CreateReminder() error = %v, want the invalid-priority error: resolution runs before option validation", err)
+	}
+}
+
+func TestCreateReminder_PlainReminderIgnoresABrokenStubsFile(t *testing.T) {
+	store := &mockStore{stubsErr: errors.New("parse stubs /data/stubs.json: unexpected end of JSON input")}
+	svc := newStubService(store)
+
+	if _, err := svc.CreateReminder(CreateInput{Text: "buy milk in 3 days"}); err != nil {
+		t.Fatalf("CreateReminder() error = %v, want a plain reminder unaffected by an unreadable stubs file", err)
+	}
+
+	_, err := svc.CreateReminder(CreateInput{Text: ":hockey"})
+	if err == nil {
+		t.Fatal("CreateReminder(\":hockey\") error = nil, want the stubs-file failure surfaced")
+	}
+	if errors.Is(err, ErrInvalidInput) {
+		t.Errorf("CreateReminder() error = %v, want an internal error, not one blamed on the caller's input", err)
+	}
+}
+
+// TestPreviewReminderText covers the preview entry point every /test
+// surface calls: it resolves a stub invocation first, so a preview
+// reports what the stub would actually schedule rather than echoing the
+// unexpanded ":hockey".
+func TestPreviewReminderText(t *testing.T) {
+	stubs := map[string]reminder.Stub{
+		"hockey": {
+			Text:     "in 15m back to the game",
+			Tags:     []string{"hockey"},
+			Priority: "high",
+		},
+	}
+
+	tests := []struct {
+		name     string
+		text     string
+		wantTask string
+		wantDue  time.Time
+	}{
+		{"bare stub name previews the expansion", ":hockey", "back to the game", stubNow.Add(15 * time.Minute)},
+		{"capitalized stub name folds", ":HOCKEY", "back to the game", stubNow.Add(15 * time.Minute)},
+		{"trailing text appends raw and the stub's time wins", ":hockey overtime", "back to the game overtime", stubNow.Add(15 * time.Minute)},
+		{"closed shortcode stays literal", ":warning: take out the trash in 2h", ":warning: take out the trash", stubNow.Add(2 * time.Hour)},
+		{"digit-initial stays literal", ":30 past the hour in 2h", ":30 past the hour", stubNow.Add(2 * time.Hour)},
+		{"plain text is unaffected", "buy milk in 3d", "buy milk", stubNow.AddDate(0, 0, 3)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &mockStore{stubs: stubs}
+			svc := newStubService(store)
+
+			task, due, err := svc.PreviewReminderText(tt.text)
+			if err != nil {
+				t.Fatalf("PreviewReminderText(%q) error = %v", tt.text, err)
+			}
+			if task != tt.wantTask {
+				t.Errorf("PreviewReminderText(%q) task = %q, want %q", tt.text, task, tt.wantTask)
+			}
+			if !due.Equal(tt.wantDue) {
+				t.Errorf("PreviewReminderText(%q) due = %v, want %v", tt.text, due, tt.wantDue)
+			}
+			if len(store.saved) != 0 {
+				t.Errorf("PreviewReminderText(%q) saved %d reminders, want 0 (preview must not persist)", tt.text, len(store.saved))
+			}
+		})
+	}
+}
+
+func TestPreviewReminderText_UnknownStubFailsTheWayACreateWould(t *testing.T) {
+	svc := newStubService(&mockStore{stubs: map[string]reminder.Stub{
+		"hockey": {Text: "in 15m back to the game"},
+	}})
+
+	_, _, previewErr := svc.PreviewReminderText(":hokey")
+	if previewErr == nil {
+		t.Fatal("PreviewReminderText(\":hokey\") error = nil, want an unknown-stub error")
+	}
+	if !errors.Is(previewErr, ErrInvalidInput) {
+		t.Errorf("PreviewReminderText() error = %v, want it to wrap ErrInvalidInput", previewErr)
+	}
+
+	_, createErr := svc.CreateReminder(CreateInput{Text: ":hokey"})
+	if createErr == nil {
+		t.Fatal("CreateReminder(\":hokey\") error = nil, want an unknown-stub error")
+	}
+	if previewErr.Error() != createErr.Error() {
+		t.Errorf("PreviewReminderText() error = %q, want the same error a create reports: %q", previewErr, createErr)
+	}
+}
+
+// TestPreviewReminderText_RejectsOptionsTheStubItselfCarries covers the
+// one create-time rejection a preview can reach: preview takes text
+// only, so the options under validation are always the stub's own, and
+// a hand-edited stub is exactly what a preview gets used to check.
+func TestPreviewReminderText_RejectsOptionsTheStubItselfCarries(t *testing.T) {
+	tests := []struct {
+		name        string
+		stub        reminder.Stub
+		wantErrText string
+	}{
+		{"bad priority", reminder.Stub{Text: "in 15m back to the game", Priority: "highh"}, "invalid priority"},
+		{"relative click url", reminder.Stub{Text: "in 15m back to the game", Click: "/game"}, "click must be an absolute URL"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := newStubService(&mockStore{stubs: map[string]reminder.Stub{"hockey": tt.stub}})
+
+			_, _, previewErr := svc.PreviewReminderText(":hockey")
+			if previewErr == nil {
+				t.Fatalf("PreviewReminderText(\":hockey\") error = nil, want %q", tt.wantErrText)
+			}
+			if !errors.Is(previewErr, ErrInvalidInput) || !strings.Contains(previewErr.Error(), tt.wantErrText) {
+				t.Errorf("PreviewReminderText() error = %v, want an ErrInvalidInput containing %q", previewErr, tt.wantErrText)
+			}
+
+			_, createErr := svc.CreateReminder(CreateInput{Text: ":hockey"})
+			if createErr == nil || previewErr.Error() != createErr.Error() {
+				t.Errorf("PreviewReminderText() error = %q, want the same error a create reports: %v", previewErr, createErr)
+			}
+		})
+	}
+}
+
+func TestListStubs_AlphabeticalWithNames(t *testing.T) {
+	svc := newStubService(&mockStore{stubs: map[string]reminder.Stub{
+		"laundry": {Text: "in 45m move the laundry"},
+		"hockey":  {Text: "in 15m back to the game", Tags: []string{"hockey"}, Priority: "high"},
+		"bins":    {Text: "in 1d take the bins out"},
+	}})
+
+	stubs, err := svc.ListStubs()
+	if err != nil {
+		t.Fatalf("ListStubs() error = %v", err)
+	}
+
+	names := make([]string, len(stubs))
+	for i, s := range stubs {
+		names[i] = s.Name
+	}
+	if want := []string{"bins", "hockey", "laundry"}; !slices.Equal(names, want) {
+		t.Errorf("ListStubs() names = %v, want %v - listing is alphabetical, not map order", names, want)
+	}
+
+	hockey := stubs[1]
+	if hockey.Text != "in 15m back to the game" || hockey.Priority != "high" || !slices.Equal(hockey.Tags, []string{"hockey"}) {
+		t.Errorf("ListStubs()[1] = %+v, want the hockey stub's own fields alongside its name", hockey)
+	}
+}
+
+func TestListStubs_NoneDefined(t *testing.T) {
+	svc := newStubService(&mockStore{})
+
+	stubs, err := svc.ListStubs()
+	if err != nil {
+		t.Fatalf("ListStubs() error = %v", err)
+	}
+	if len(stubs) != 0 {
+		t.Errorf("ListStubs() = %v, want an empty list", stubs)
+	}
+}
+
+func TestSetStub_StoresTheDefinition(t *testing.T) {
+	store := &mockStore{}
+	svc := newStubService(store)
+
+	stub := reminder.Stub{
+		Text:     "in 15m back to the game",
+		Tags:     []string{"hockey"},
+		Priority: "high",
+		Click:    "https://example.com/game",
+	}
+	if _, err := svc.SetStub("hockey", stub); err != nil {
+		t.Fatalf("SetStub() error = %v", err)
+	}
+
+	if !reflect.DeepEqual(store.stubs["hockey"], stub) {
+		t.Errorf("stored stub = %+v, want %+v", store.stubs["hockey"], stub)
+	}
+
+	// Idempotency
+	if _, err := svc.SetStub("hockey", stub); err != nil {
+		t.Fatalf("SetStub() (again) error = %v", err)
+	}
+	if len(store.stubs) != 1 {
+		t.Errorf("store holds %d stubs after two identical writes, want 1", len(store.stubs))
+	}
+}
+
+// TestSetStub_ReportsWhetherItCreated pins the created-versus-updated
+// signal the ntfy "/stub" confirmation reads, so a mistyped name shows
+// as a new stub rather than silently reading like an edit of the one
+// that was meant.
+func TestSetStub_ReportsWhetherItCreated(t *testing.T) {
+	svc := newStubService(&mockStore{})
+
+	created, err := svc.SetStub("hockey", reminder.Stub{Text: "in 15m back to the game"})
+	if err != nil {
+		t.Fatalf("SetStub() error = %v", err)
+	}
+	if !created {
+		t.Error("SetStub() created = false for a new name, want true")
+	}
+
+	created, err = svc.SetStub("hockey", reminder.Stub{Text: "in 20m back to the game"})
+	if err != nil {
+		t.Fatalf("SetStub() (replacing) error = %v", err)
+	}
+	if created {
+		t.Error("SetStub() created = true when replacing, want false")
+	}
+}
+
+func TestSetStub_RejectsBadInput(t *testing.T) {
+	tests := []struct {
+		name     string
+		stubName string
+		stub     reminder.Stub
+		wantErr  string
+	}{
+		{
+			name:     "text the parser cannot schedule",
+			stubName: "hockey",
+			stub:     reminder.Stub{Text: "back to the game"},
+			wantErr:  "no time information found",
+		},
+		{
+			name:     "empty text",
+			stubName: "hockey",
+			stub:     reminder.Stub{Text: "   "},
+			wantErr:  "empty reminder text",
+		},
+		{
+			name:     "text over the reminder length cap",
+			stubName: "hockey",
+			stub:     reminder.Stub{Text: "in 15m " + strings.Repeat("x", maxReminderTextLength)},
+			wantErr:  "too long",
+		},
+		{
+			name:     "invalid priority",
+			stubName: "hockey",
+			stub:     reminder.Stub{Text: "in 15m back to the game", Priority: "loudest"},
+			wantErr:  "invalid priority",
+		},
+		{
+			name:     "non-absolute click url",
+			stubName: "hockey",
+			stub:     reminder.Stub{Text: "in 15m back to the game", Click: "/game"},
+			wantErr:  "absolute URL",
+		},
+		{
+			name:     "mixed-case name is an error, not a silent fold",
+			stubName: "Hockey",
+			stub:     reminder.Stub{Text: "in 15m back to the game"},
+			wantErr:  "stub name",
+		},
+		{
+			name:     "digit-initial name",
+			stubName: "3hockey",
+			stub:     reminder.Stub{Text: "in 15m back to the game"},
+			wantErr:  "stub name",
+		},
+		{
+			name:     "name with a space",
+			stubName: "ice hockey",
+			stub:     reminder.Stub{Text: "in 15m back to the game"},
+			wantErr:  "stub name",
+		},
+		{
+			name:     "empty name",
+			stubName: "",
+			stub:     reminder.Stub{Text: "in 15m back to the game"},
+			wantErr:  "stub name",
+		},
+		{
+			name:     "stub-shaped body could never resolve",
+			stubName: "hockey",
+			stub:     reminder.Stub{Text: ":laundry"},
+			wantErr:  "expand",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &mockStore{}
+			svc := newStubService(store)
+
+			_, err := svc.SetStub(tt.stubName, tt.stub)
+			if err == nil {
+				t.Fatalf("SetStub(%q, %+v) error = nil, want one mentioning %q", tt.stubName, tt.stub, tt.wantErr)
+			}
+			if !errors.Is(err, ErrInvalidInput) {
+				t.Errorf("SetStub() error = %v, want it to wrap ErrInvalidInput", err)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("SetStub() error = %v, want it to mention %q", err, tt.wantErr)
+			}
+			if len(store.stubs) != 0 {
+				t.Errorf("store holds %d stubs after a rejected write, want 0", len(store.stubs))
+			}
+		})
+	}
+}
+
+// TestSetStub_DefinitionDoesNotDependOnTheWallClock pins the one parse
+// failure stub definition tolerates. A clock-time stub is
+// time-of-day-limited when *invoked* ("at 9am ..." only resolves before
+// 9am) - that is inherited from plain reminders and is expected. What
+// must not happen is the same limit applying to *defining* it, which
+// would make an identical PUT a 200 in the morning and a 400 in the
+// afternoon.
+func TestSetStub_DefinitionDoesNotDependOnTheWallClock(t *testing.T) {
+	store := &mockStore{}
+	svc := New(store)
+	// 10:00, an hour after the stub's own time has passed for the day.
+	svc.now = func() time.Time { return time.Date(2026, 6, 15, 10, 0, 0, 0, time.Local) }
+
+	if _, err := svc.SetStub("standup", reminder.Stub{Text: "standup at 9am"}); err != nil {
+		t.Fatalf("SetStub() error = %v, want a clock-time stub definable at any hour", err)
+	}
+	if store.stubs["standup"].Text != "standup at 9am" {
+		t.Errorf("stored = %+v, want the stub written as given", store.stubs["standup"])
+	}
+
+	// Invoking it while the time has passed still fails, unchanged -
+	// only definition is exempt.
+	if _, err := svc.CreateReminder(CreateInput{Text: ":standup"}); !errors.Is(err, ErrPastDue) {
+		t.Errorf("CreateReminder(\":standup\") error = %v, want it still rejected as past due at invocation", err)
+	}
+	if len(store.saved) != 0 {
+		t.Errorf("store holds %d reminders, want 0 - a past-due invocation stores nothing", len(store.saved))
+	}
+}
+
+func TestSetStub_AcceptsEveryValidNameShape(t *testing.T) {
+	for _, name := range []string{"h", "hockey", "ice-hockey", "ice_hockey", "hockey2"} {
+		t.Run(name, func(t *testing.T) {
+			svc := newStubService(&mockStore{})
+			if _, err := svc.SetStub(name, reminder.Stub{Text: "in 15m back to the game"}); err != nil {
+				t.Errorf("SetStub(%q) error = %v, want it accepted", name, err)
+			}
+		})
+	}
+}
+
+func TestDeleteStub(t *testing.T) {
+	store := &mockStore{stubs: map[string]reminder.Stub{"hockey": {Text: "in 15m back to the game"}}}
+	svc := newStubService(store)
+
+	if err := svc.DeleteStub("hockey"); err != nil {
+		t.Fatalf("DeleteStub() error = %v", err)
+	}
+	if _, ok := store.stubs["hockey"]; ok {
+		t.Error("DeleteStub() left the stub in the store")
+	}
+
+	err := svc.DeleteStub("hockey")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("DeleteStub() on an absent stub error = %v, want ErrNotFound", err)
+	}
 }

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -32,7 +33,10 @@ const ageLineThreshold = time.Hour
 // inbound ntfy messages.
 type ReminderService interface {
 	CreateReminder(service.CreateInput) (*reminder.Reminder, error)
-	ParseReminderText(text string) (task string, due time.Time, err error)
+	PreviewReminderText(text string) (task string, due time.Time, err error)
+	ListStubs() ([]reminder.NamedStub, error)
+	SetStub(name string, stub reminder.Stub) (created bool, err error)
+	DeleteStub(name string) error
 }
 
 type subscriptionMessage struct {
@@ -346,17 +350,21 @@ func (c *Client) Run(ctx context.Context) {
 
 func (c *Client) consume(ctx context.Context, msgs <-chan subscriptionMessage) {
 	for msg := range msgs {
-		if rest, ok := cutTestPrefix(msg.Text); ok {
-			c.handleTestParse(ctx, msg.Inbound, rest)
-			continue
+		if verb, rest, ok := cutCommand(msg.Text); ok {
+			if handle, known := commands[verb]; known {
+				handle(c, ctx, msg.Inbound, rest)
+				continue
+			}
+			// An unrecognised slash word is not a command, it is text:
+			// it falls through to reminder creation the way it always
+			// has, so a message that merely starts with a slash still
+			// becomes a reminder rather than an error about a verb.
 		}
 
 		text, tags, priority, err := parseDirectives(msg.Text)
 		if err != nil {
 			slog.Error("failed to parse inbound directives", "err", err)
-			if sendErr := c.sendError(ctx, msg.Inbound, err); sendErr != nil {
-				slog.Error("failed to send error feedback", "err", sendErr)
-			}
+			c.replyError(ctx, msg.Inbound, err)
 			continue
 		}
 
@@ -368,9 +376,7 @@ func (c *Client) consume(ctx context.Context, msgs <-chan subscriptionMessage) {
 		})
 		if err != nil {
 			slog.Error("failed to create reminder from ntfy", "err", err)
-			if sendErr := c.sendError(ctx, msg.Inbound, err); sendErr != nil {
-				slog.Error("failed to send error feedback", "err", sendErr)
-			}
+			c.replyError(ctx, msg.Inbound, err)
 			continue
 		}
 		slog.Info("reminder created via ntfy", "topic", rem.OutboundTopics, "id", rem.ID, "due", rem.DueAt)
@@ -381,40 +387,192 @@ func (c *Client) consume(ctx context.Context, msgs <-chan subscriptionMessage) {
 	}
 }
 
-// cutTestPrefix reports whether text is the "/test" diagnostic trigger
-// (case-insensitive, e.g. from a phone keyboard's autocapitalize) and
-// returns whatever follows it, trimmed. Matches a bare "/test" (rest "")
-// and "/test <anything>" alike.
-func cutTestPrefix(text string) (rest string, ok bool) {
+// commandHandler handles one inbound slash command: inbound is the
+// topic the message arrived on, which is also the topic any reply goes
+// back out on, and rest is everything after the verb.
+type commandHandler func(c *Client, ctx context.Context, inbound, rest string)
+
+// commands is the inbound command table, keyed by lowercased verb.
+// Adding a command is adding a row here; nothing in consume changes.
+//
+// Defining verbs live in this slash namespace and invocation stays
+// ":name", so the two never collide and no name needs reserving:
+// "/stub rm ..." defines a stub named "rm" only if someone writes it,
+// while deleting is its own verb.
+var commands = map[string]commandHandler{
+	"/test":   (*Client).handleTestParse,
+	"/stub":   (*Client).handleStubSet,
+	"/unstub": (*Client).handleStubDelete,
+	"/stubs":  (*Client).handleStubList,
+}
+
+// cutCommand splits text into a lowercased leading slash verb and the
+// rest of the message, trimmed. The verb is lowered because a phone
+// keyboard autocapitalizes the first word of a message; the rest is
+// left exactly as typed, since stub names and reminder text are the
+// user's own bytes.
+//
+// It reports every "/word" opener as a command, known or not - which of
+// them actually is one is the table's decision, not the splitter's.
+func cutCommand(text string) (verb, rest string, ok bool) {
 	trimmed := strings.TrimSpace(text)
-	lower := strings.ToLower(trimmed)
-	if lower != "/test" && !strings.HasPrefix(lower, "/test ") {
-		return "", false
+	if !strings.HasPrefix(trimmed, "/") {
+		return "", "", false
 	}
-	return strings.TrimSpace(trimmed[len("/test"):]), true
+	verb, rest, _ = strings.Cut(trimmed, " ")
+	return strings.ToLower(verb), strings.TrimSpace(rest), true
+}
+
+// handleStubSet defines or replaces a stub: the first word of rest is
+// the name, the remainder is the body. The body goes through
+// parseDirectives, the same trailing "#tag !priority" grammar a plain
+// reminder uses, so defining a stub needs no second syntax.
+//
+// The name is passed through exactly as typed. Only the verb folds
+// case; a write names its stub explicitly, so "Hockey" is the service's
+// error to report rather than something to silently fold here.
+func (c *Client) handleStubSet(ctx context.Context, inbound, rest string) {
+	name, body, _ := strings.Cut(rest, " ")
+	name = trimStubSigil(name)
+	body = strings.TrimSpace(body)
+	if name == "" || body == "" {
+		c.replyError(ctx, inbound, errors.New(`usage: /stub <name> <text> - e.g. "/stub hockey in 15m back to the game #hockey !high"`))
+		return
+	}
+
+	text, tags, priority, err := parseDirectives(body)
+	if err != nil {
+		slog.Error("failed to parse inbound directives for /stub", "err", err)
+		c.replyError(ctx, inbound, err)
+		return
+	}
+
+	stub := reminder.Stub{Text: text, Tags: tags, Priority: priority}
+	created, err := c.svc.SetStub(name, stub)
+	if err != nil {
+		slog.Error("failed to define stub from ntfy", "name", name, "err", err)
+		c.replyError(ctx, inbound, err)
+		return
+	}
+	slog.Info("stub defined via ntfy", "name", name, "created", created)
+
+	verb := "updated"
+	if created {
+		verb = "created"
+	}
+	// No due time: the stub resolves fresh on every invocation, so a
+	// moment computed now is one it will never fire at.
+	if err := c.sendSystem(ctx, fmt.Sprintf("Stub :%s %s ✅ %s", name, verb, describeStub(stub)), inbound); err != nil {
+		slog.Error("failed to send stub confirmation", "err", err)
+	}
+}
+
+// handleStubDelete removes a stub. Deleting is its own verb rather than
+// a sub-verb of /stub: "/stub rm hockey" could not be told apart from
+// defining a stub named "rm", and an empty body meaning delete would
+// make a truncated message destructive.
+func (c *Client) handleStubDelete(ctx context.Context, inbound, rest string) {
+	name := trimStubSigil(strings.TrimSpace(rest))
+	if name == "" || strings.ContainsAny(name, " \t") {
+		c.replyError(ctx, inbound, errors.New(`usage: /unstub <name> - e.g. "/unstub hockey"`))
+		return
+	}
+
+	if err := c.svc.DeleteStub(name); err != nil {
+		slog.Error("failed to delete stub from ntfy", "name", name, "err", err)
+		c.replyError(ctx, inbound, err)
+		return
+	}
+	slog.Info("stub deleted via ntfy", "name", name)
+
+	if err := c.sendSystem(ctx, fmt.Sprintf("Stub :%s deleted ✅", name), inbound); err != nil {
+		slog.Error("failed to send stub deletion confirmation", "err", err)
+	}
+}
+
+// handleStubList replies with every defined stub, one per line, each
+// named as it is invoked so the reply doubles as a list of what can be
+// typed next.
+func (c *Client) handleStubList(ctx context.Context, inbound, rest string) {
+	stubs, err := c.svc.ListStubs()
+	if err != nil {
+		slog.Error("failed to list stubs from ntfy", "err", err)
+		c.replyError(ctx, inbound, err)
+		return
+	}
+
+	msg := "No stubs defined."
+	if len(stubs) > 0 {
+		lines := make([]string, 0, len(stubs)+1)
+		lines = append(lines, fmt.Sprintf("%d stub(s):", len(stubs)))
+		for _, stub := range stubs {
+			lines = append(lines, fmt.Sprintf(":%s %s", stub.Name, describeStub(stub.Stub)))
+		}
+		msg = strings.Join(lines, "\n")
+	}
+
+	if err := c.sendSystem(ctx, msg, inbound); err != nil {
+		slog.Error("failed to send stub list", "err", err)
+	}
+}
+
+// describeStub renders what a stub expands to: the text quoted, so its
+// boundaries are visible against the directives that follow, then those
+// directives in the "#tag !priority" form they were defined with. It
+// reads back as what was typed, but it is not itself retypeable - the
+// quotes would become part of the text - and a listing names the stub
+// ":name" for invoking, not for redefining. Click has no directive form
+// and is shown plainly.
+func describeStub(stub reminder.Stub) string {
+	parts := []string{fmt.Sprintf("%q", stub.Text)}
+	for _, tag := range stub.Tags {
+		parts = append(parts, "#"+tag)
+	}
+	if stub.Priority != "" {
+		parts = append(parts, "!"+stub.Priority)
+	}
+	if stub.Click != "" {
+		parts = append(parts, stub.Click)
+	}
+	return strings.Join(parts, " ")
+}
+
+// trimStubSigil strips the invocation sigil from a name typed with it.
+// Stubs are stored unprefixed, but "/stubs" lists them as ":name" so
+// each line doubles as the invocation, and a name pasted back off that
+// line has to work. `later stub set|del` is tolerant the same way.
+func trimStubSigil(name string) string {
+	return strings.TrimPrefix(name, ":")
+}
+
+// replyError reports err back on the topic the command arrived on,
+// logging a failure to send rather than propagating it: a handler has
+// nowhere left to return an error to.
+func (c *Client) replyError(ctx context.Context, inbound string, err error) {
+	if sendErr := c.sendError(ctx, inbound, err); sendErr != nil {
+		slog.Error("failed to send error feedback", "err", sendErr)
+	}
 }
 
 // handleTestParse previews rest the same way a real create would - through
 // parseDirectives first, so a "/test buy milk tomorrow #work" preview
 // never shows a tag stuck in the task text a real send would have
-// stripped - then replies with task+due only (stripped tags/priority
-// aren't echoed back; this is a preview of the *time* parsing).
+// stripped, then through PreviewReminderText, so "/test :hockey" shows
+// what the stub would schedule rather than the invocation itself - then
+// replies with task+due only (stripped tags/priority aren't echoed back;
+// this is a preview of the *time* parsing).
 func (c *Client) handleTestParse(ctx context.Context, inbound, rest string) {
 	text, _, _, err := parseDirectives(rest)
 	if err != nil {
 		slog.Error("failed to parse inbound directives for /test", "err", err)
-		if sendErr := c.sendError(ctx, inbound, err); sendErr != nil {
-			slog.Error("failed to send error feedback", "err", sendErr)
-		}
+		c.replyError(ctx, inbound, err)
 		return
 	}
 
-	task, due, err := c.svc.ParseReminderText(text)
+	task, due, err := c.svc.PreviewReminderText(text)
 	if err != nil {
 		slog.Error("failed to preview parse from ntfy", "err", err)
-		if sendErr := c.sendError(ctx, inbound, err); sendErr != nil {
-			slog.Error("failed to send error feedback", "err", sendErr)
-		}
+		c.replyError(ctx, inbound, err)
 		return
 	}
 
