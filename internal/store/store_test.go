@@ -202,3 +202,142 @@ func TestNew_CorruptedPendingFile(t *testing.T) {
 		t.Errorf("New() error = %q, want it to mention the file path %q", err.Error(), pendingPath)
 	}
 }
+
+func TestLoadStubs_ReadsDefinitions(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(dir)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	contents := `{
+  "hockey": {"text": "in 15m back to the game", "tags": ["hockey"], "priority": "high", "click": "https://example.com/game"},
+  "laundry": {"text": "in 45m move the laundry"}
+}`
+	if err := os.WriteFile(filepath.Join(dir, "stubs.json"), []byte(contents), 0600); err != nil {
+		t.Fatalf("failed to write stubs file: %v", err)
+	}
+
+	stubs, err := s.LoadStubs()
+	if err != nil {
+		t.Fatalf("LoadStubs() error = %v", err)
+	}
+
+	if len(stubs) != 2 {
+		t.Fatalf("LoadStubs() returned %d stubs, want 2", len(stubs))
+	}
+
+	hockey := stubs["hockey"]
+	if hockey.Text != "in 15m back to the game" {
+		t.Errorf("hockey text = %q, want %q", hockey.Text, "in 15m back to the game")
+	}
+	if len(hockey.Tags) != 1 || hockey.Tags[0] != "hockey" {
+		t.Errorf("hockey tags = %v, want [hockey]", hockey.Tags)
+	}
+	if hockey.Priority != "high" {
+		t.Errorf("hockey priority = %q, want %q", hockey.Priority, "high")
+	}
+	if hockey.Click != "https://example.com/game" {
+		t.Errorf("hockey click = %q, want %q", hockey.Click, "https://example.com/game")
+	}
+
+	if stubs["laundry"].Text != "in 45m move the laundry" {
+		t.Errorf("laundry text = %q, want %q", stubs["laundry"].Text, "in 45m move the laundry")
+	}
+}
+
+func TestLoadStubs_MissingFile(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(dir)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	stubs, err := s.LoadStubs()
+	if err != nil {
+		t.Fatalf("LoadStubs() error = %v, want no error for a missing file", err)
+	}
+	if len(stubs) != 0 {
+		t.Errorf("LoadStubs() returned %d stubs, want 0", len(stubs))
+	}
+
+	stubsPath := filepath.Join(dir, "stubs.json")
+	if _, err := os.Stat(stubsPath); !os.IsNotExist(err) {
+		t.Errorf("reading created %q; the file must not be created merely by reading", stubsPath)
+	}
+}
+
+func TestLoadStubs_EmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(dir)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "stubs.json"), nil, 0600); err != nil {
+		t.Fatalf("failed to write empty stubs file: %v", err)
+	}
+
+	stubs, err := s.LoadStubs()
+	if err != nil {
+		t.Fatalf("LoadStubs() error = %v, want no error for an empty file", err)
+	}
+	if len(stubs) != 0 {
+		t.Errorf("LoadStubs() returned %d stubs, want 0", len(stubs))
+	}
+}
+
+func TestLoadStubs_MalformedFile(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(dir)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	stubsPath := filepath.Join(dir, "stubs.json")
+	if err := os.WriteFile(stubsPath, []byte("{not valid json"), 0600); err != nil {
+		t.Fatalf("failed to corrupt stubs file: %v", err)
+	}
+
+	stubs, err := s.LoadStubs()
+	if err == nil {
+		t.Fatal("LoadStubs() error = nil, want an error for malformed JSON")
+	}
+	if !strings.Contains(err.Error(), stubsPath) {
+		t.Errorf("LoadStubs() error = %q, want it to name the file path %q", err.Error(), stubsPath)
+	}
+	if stubs != nil {
+		t.Errorf("LoadStubs() = %v, want nil map alongside the error", stubs)
+	}
+}
+
+func TestLoadStubs_RereadsOnEveryCall(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(dir)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	stubsPath := filepath.Join(dir, "stubs.json")
+	if err := os.WriteFile(stubsPath, []byte(`{"hockey": {"text": "in 15m back to the game"}}`), 0600); err != nil {
+		t.Fatalf("failed to write stubs file: %v", err)
+	}
+	if _, err := s.LoadStubs(); err != nil {
+		t.Fatalf("LoadStubs() error = %v", err)
+	}
+
+	if err := os.WriteFile(stubsPath, []byte(`{"laundry": {"text": "in 45m move the laundry"}}`), 0600); err != nil {
+		t.Fatalf("failed to rewrite stubs file: %v", err)
+	}
+
+	stubs, err := s.LoadStubs()
+	if err != nil {
+		t.Fatalf("LoadStubs() (second call) error = %v", err)
+	}
+	if _, ok := stubs["hockey"]; ok {
+		t.Error("LoadStubs() still returned the edited-away stub; it must re-read the file on every call")
+	}
+	if stubs["laundry"].Text != "in 45m move the laundry" {
+		t.Errorf("laundry text = %q, want the hand-edited value", stubs["laundry"].Text)
+	}
+}

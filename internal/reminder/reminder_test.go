@@ -1,7 +1,10 @@
 package reminder
 
 import (
+	"encoding/json"
+	"reflect"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -55,5 +58,36 @@ func TestDedupeStrings(t *testing.T) {
 				t.Errorf("DedupeStrings(%v) = %v, want %v", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestStubRoundTripsItsFields(t *testing.T) {
+	want := Stub{
+		Text:     "in 15m back to the game",
+		Tags:     []string{"hockey"},
+		Priority: "high",
+		Click:    "https://example.com/game",
+	}
+
+	data, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	var got Stub
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("round-tripped stub = %+v, want %+v", got, want)
+	}
+
+	for _, field := range []string{`"text"`, `"tags"`, `"priority"`, `"click"`} {
+		if !strings.Contains(string(data), field) {
+			t.Errorf("stub JSON = %s, want it to carry %s", data, field)
+		}
+	}
+	if strings.Contains(string(data), "outbound_topics") {
+		t.Errorf("stub JSON = %s, want no outbound_topics field", data)
 	}
 }

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -18,6 +19,7 @@ type Store struct {
 	pending     []reminder.Reminder
 	pendingPath string
 	archivePath string
+	stubsPath   string
 }
 
 func New(dataDir string) (*Store, error) {
@@ -28,6 +30,7 @@ func New(dataDir string) (*Store, error) {
 	s := &Store{
 		pendingPath: filepath.Join(dataDir, "pending.json"),
 		archivePath: filepath.Join(dataDir, "archive.json"),
+		stubsPath:   filepath.Join(dataDir, "stubs.json"),
 	}
 	if err := s.loadPending(); err != nil {
 		return nil, err
@@ -150,6 +153,29 @@ func (s *Store) loadArchive() ([]reminder.ArchivedReminder, error) {
 
 func (s *Store) ListArchive() ([]reminder.ArchivedReminder, error) {
 	return s.loadArchive()
+}
+
+// LoadStubs reads the stub definitions from stubs.json. It reads from
+// disk on every call and keeps no cached copy, so hand-editing the file
+// takes effect on the next lookup with no restart, signal or watcher.
+// The file is never created merely by reading it.
+func (s *Store) LoadStubs() (map[string]reminder.Stub, error) {
+	data, err := os.ReadFile(s.stubsPath)
+	if os.IsNotExist(err) {
+		return map[string]reminder.Stub{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read stubs %s: %w", s.stubsPath, err)
+	}
+	stubs := map[string]reminder.Stub{}
+
+	if len(bytes.TrimSpace(data)) == 0 {
+		return stubs, nil
+	}
+	if err := json.Unmarshal(data, &stubs); err != nil {
+		return nil, fmt.Errorf("parse stubs %s: %w", s.stubsPath, err)
+	}
+	return stubs, nil
 }
 
 func writeAtomic(path string, data []byte) error {
