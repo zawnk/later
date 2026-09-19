@@ -74,7 +74,10 @@ type Store interface {
 	ListPendingReminders() []reminder.Reminder
 	ListArchive() ([]reminder.ArchivedReminder, error)
 	CancelReminder(id string) (bool, error)
+	LoadStubs() (map[string]reminder.Stub, error)
 }
+
+var stubInvocationRegex = regexp.MustCompile(`^:([A-Za-z][A-Za-z0-9_-]*)(?:\s|$)`)
 
 var singleUnitRegex = regexp.MustCompile(`(^|\s)(in|within) (\d+)(y|mo|w|d|h|m|s)\b`)
 var combinedDurationRegex = regexp.MustCompile(`(^|\s)((?:in |within )?(?:\d+(?:y|mo|w|d|h|m|s)){2,})\b`)
@@ -193,24 +196,30 @@ func (s *Service) ParseReminderText(text string) (task string, due time.Time, er
 // CreateReminder runs creation as an explicit, ordered sequence of named
 // steps, each of which may reject the input before the next one runs:
 //
-//  1. validateNotificationOptions - the notification options ntfy itself
+//  1. resolveStub - expand a leading ":name" into the fields its
+//     definition carries.
+//  2. validateNotificationOptions - the notification options ntfy itself
 //     would reject (priority, click).
-//  2. ParseReminderText - task text and due time out of in.Text.
-//  3. generateUniqueID - an id that collides with nothing pending or
+//  3. ParseReminderText - task text and due time out of in.Text.
+//  4. generateUniqueID - an id that collides with nothing pending or
 //     archived.
-//  4. newReminder - assemble the record.
-//  5. store.SaveReminder - persist it.
+//  5. newReminder - assemble the record.
+//  6. store.SaveReminder - persist it.
 //
 // The order is load-bearing. Option validation runs
 // first because everything ntfy would reject must be rejected at create
 // time, while there is still a caller to report it to: a reminder that
 // stores cleanly and then fails forever at fire time is the one outcome
-// this pipeline exists to prevent. That is also why anything that can
-// *supply* those options - stub resolution, when it lands - has to be
-// inserted ahead of step 1 rather than after it: a hand-edited stub
-// carrying a bad priority would otherwise slip past create-time
-// validation entirely.
+// this pipeline exists to prevent. That is also why stub resolution -
+// the one step that can *supply* those options - runs ahead of
+// validation rather than after it: a hand-edited stub carrying a bad
+// priority would otherwise slip past create-time validation entirely.
 func (s *Service) CreateReminder(in CreateInput) (*reminder.Reminder, error) {
+	in, err := s.resolveStub(in)
+	if err != nil {
+		return nil, err
+	}
+
 	if err := validateNotificationOptions(in); err != nil {
 		return nil, err
 	}
@@ -232,6 +241,67 @@ func (s *Service) CreateReminder(in CreateInput) (*reminder.Reminder, error) {
 	}
 
 	return rem, nil
+}
+
+// resolveStub expands a leading ":name" into the reminder its stub
+// defines. Anything not stub-shaped is returned untouched, and the
+// stubs file is read only once the text is stub-shaped, so a missing or
+// malformed stubs.json can never affect a plain reminder.
+//
+// The merge:
+//
+//   - text: the stub's, with any trailing text appended raw. ":hockey in
+//     30m" becomes "in 15m back to the game in 30m", so the stub's own
+//     time wins by being leftmost and "in 30m" stays in the task text.
+//     No time-phrase detection - a plain reminder carrying two durations
+//     already resolves this way.
+//   - priority and click: the request's if it supplied them, else the
+//     stub's.
+//   - tags: both, deduped.
+//   - outbound topics: never the stub's - routing is already concrete
+//     by the time creation runs.
+//
+// Expansion happens once. A stub whose own text is stub-shaped is
+// rejected rather than expanded again, and rejecting it here rather
+// than leaving it to the parser matters because only some such bodies
+// fail to parse: ":laundry in 45m" parses fine and would store a
+// reminder whose task text is a literal sigil.
+func (s *Service) resolveStub(in CreateInput) (CreateInput, error) {
+	text := strings.TrimSpace(in.Text)
+
+	match := stubInvocationRegex.FindStringSubmatch(text)
+	if match == nil {
+		return in, nil
+	}
+	name := strings.ToLower(match[1])
+
+	stubs, err := s.store.LoadStubs()
+	if err != nil {
+		return CreateInput{}, fmt.Errorf("failed to load stubs: %w", err)
+	}
+	stub, ok := stubs[name]
+	if !ok {
+		return CreateInput{}, fmt.Errorf("%w: unknown stub %q", ErrInvalidInput, ":"+match[1])
+	}
+	if stubInvocationRegex.MatchString(strings.TrimSpace(stub.Text)) {
+		return CreateInput{}, fmt.Errorf("%w: stub %q expands to another stub invocation; stubs expand once", ErrInvalidInput, ":"+name)
+	}
+
+	in.Text = stub.Text
+	if trailing := strings.TrimSpace(text[len(match[0]):]); trailing != "" {
+		in.Text = stub.Text + " " + trailing
+	}
+	if len(stub.Tags)+len(in.Tags) > 0 {
+		in.Tags = reminder.DedupeStrings(append(append([]string{}, stub.Tags...), in.Tags...))
+	}
+	if in.Priority == "" {
+		in.Priority = stub.Priority
+	}
+	if in.Click == "" {
+		in.Click = stub.Click
+	}
+
+	return in, nil
 }
 
 // newReminder assembles the stored record out of an already-validated

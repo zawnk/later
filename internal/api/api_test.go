@@ -192,9 +192,10 @@ func TestAuth(t *testing.T) {
 }
 
 type stubStore struct {
-	saved   []reminder.Reminder
-	pending []reminder.Reminder
-	archive []reminder.ArchivedReminder
+	saved    []reminder.Reminder
+	pending  []reminder.Reminder
+	archive  []reminder.ArchivedReminder
+	stubDefs map[string]reminder.Stub
 }
 
 func (s *stubStore) SaveReminder(r reminder.Reminder) error    { s.saved = append(s.saved, r); return nil }
@@ -203,6 +204,9 @@ func (s *stubStore) ListArchive() ([]reminder.ArchivedReminder, error) {
 	return s.archive, nil
 }
 func (s *stubStore) CancelReminder(id string) (bool, error) { return false, nil }
+func (s *stubStore) LoadStubs() (map[string]reminder.Stub, error) {
+	return s.stubDefs, nil
+}
 
 func TestCreateReminder_TopicScoping(t *testing.T) {
 	cfg := &config.Config{
@@ -1154,5 +1158,72 @@ func TestListPending_Pagination(t *testing.T) {
 				t.Errorf("reminder IDs = %v, want %v", gotIDs, tt.wantIDs)
 			}
 		})
+	}
+}
+
+// TestCreateReminder_StubInvocation covers the CLI's stub path too:
+// "later :hockey" is free text kong routes to the default create
+// command, which posts this exact body.
+func TestCreateReminder_StubInvocation(t *testing.T) {
+	cfg := &config.Config{
+		AuthTokens: []config.Token{{Token: "valid-token", Outbound: []string{"topic-a"}}},
+	}
+	store := &stubStore{stubDefs: map[string]reminder.Stub{
+		"hockey": {
+			Text:     "in 15m back to the game",
+			Tags:     []string{"hockey"},
+			Priority: "high",
+			Click:    "https://example.com/game",
+		},
+	}}
+	a := New(cfg, service.New(store), testActionSecret, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/reminders", strings.NewReader(`{"text":":hockey"}`))
+	req.Header.Set("Authorization", "Bearer valid-token")
+	rr := httptest.NewRecorder()
+	a.Routes().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d (body: %s)", rr.Code, http.StatusCreated, rr.Body.String())
+	}
+
+	var rem reminder.Reminder
+	if err := json.NewDecoder(rr.Body).Decode(&rem); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+
+	if rem.Text != "back to the game" {
+		t.Errorf("response Text = %q, want the stub's expanded text", rem.Text)
+	}
+	if !slices.Equal(rem.Tags, []string{"hockey"}) {
+		t.Errorf("response Tags = %v, want [hockey] - structured tags are what the shell would have eaten", rem.Tags)
+	}
+	if rem.Priority != "high" {
+		t.Errorf("response Priority = %q, want %q", rem.Priority, "high")
+	}
+	if rem.Click != "https://example.com/game" {
+		t.Errorf("response Click = %q, want the stub's click", rem.Click)
+	}
+	if !slices.Equal(rem.OutboundTopics, []string{"topic-a"}) {
+		t.Errorf("response OutboundTopics = %v, want the token's topics - stubs never carry routing", rem.OutboundTopics)
+	}
+}
+
+func TestCreateReminder_UnknownStubIsABadRequest(t *testing.T) {
+	cfg := &config.Config{
+		AuthTokens: []config.Token{{Token: "valid-token", Outbound: []string{"topic-a"}}},
+	}
+	a := New(cfg, service.New(&stubStore{}), testActionSecret, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/reminders", strings.NewReader(`{"text":":hokey"}`))
+	req.Header.Set("Authorization", "Bearer valid-token")
+	rr := httptest.NewRecorder()
+	a.Routes().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d (body: %s)", rr.Code, http.StatusBadRequest, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "unknown stub") {
+		t.Errorf("body = %s, want it to say the stub is unknown", rr.Body.String())
 	}
 }

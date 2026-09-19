@@ -1,0 +1,81 @@
+package service
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/zawnk/later/internal/store"
+)
+
+// newServiceOverDataDir builds the service over the real store the way
+// cmd/later-server does, so these tests exercise the actual stubs.json
+// wiring rather than a hand-written double of it.
+func newServiceOverDataDir(t *testing.T, stubsFile string) *Service {
+	t.Helper()
+
+	dir := t.TempDir()
+	if stubsFile != "" {
+		if err := os.WriteFile(filepath.Join(dir, "stubs.json"), []byte(stubsFile), 0600); err != nil {
+			t.Fatalf("failed to write stubs file: %v", err)
+		}
+	}
+
+	s, err := store.New(dir)
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+
+	svc := New(s)
+	svc.now = func() time.Time { return stubNow }
+	return svc
+}
+
+func TestCreateReminder_ResolvesAStubFromTheDataDir(t *testing.T) {
+	svc := newServiceOverDataDir(t, `{"hockey": {"text": "in 15m back to the game", "tags": ["hockey"], "priority": "high"}}`)
+
+	rem, err := svc.CreateReminder(CreateInput{Text: ":hockey"})
+	if err != nil {
+		t.Fatalf("CreateReminder(\":hockey\") error = %v", err)
+	}
+	if rem.Text != "back to the game" {
+		t.Errorf("CreateReminder() Text = %q, want the stub's text", rem.Text)
+	}
+	if want := stubNow.Add(15 * time.Minute); !rem.DueAt.Equal(want) {
+		t.Errorf("CreateReminder() DueAt = %v, want %v", rem.DueAt, want)
+	}
+	if len(rem.Tags) != 1 || rem.Tags[0] != "hockey" || rem.Priority != "high" {
+		t.Errorf("CreateReminder() tags/priority = %v/%q, want [hockey]/high", rem.Tags, rem.Priority)
+	}
+}
+
+func TestCreateReminder_StubsFileAbsentOrMalformed(t *testing.T) {
+	tests := []struct {
+		name      string
+		stubsFile string
+		wantErr   string
+	}{
+		{"no stubs file at all", "", "unknown stub"},
+		{"malformed stubs file", "{not valid json", "stubs.json"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := newServiceOverDataDir(t, tt.stubsFile)
+
+			if _, err := svc.CreateReminder(CreateInput{Text: "buy milk in 3 days"}); err != nil {
+				t.Fatalf("CreateReminder() error = %v, want a plain reminder unaffected by the stubs file", err)
+			}
+
+			_, err := svc.CreateReminder(CreateInput{Text: ":hockey"})
+			if err == nil {
+				t.Fatalf("CreateReminder(\":hockey\") error = nil, want an error mentioning %q", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("CreateReminder() error = %v, want it to mention %q", err, tt.wantErr)
+			}
+		})
+	}
+}

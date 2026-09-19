@@ -1388,3 +1388,68 @@ func TestRun_NoInboundTopics(t *testing.T) {
 		t.Errorf("server saw %d requests, want 0 when no inbound topics are configured", len(reqs))
 	}
 }
+
+// TestRun_StubInvocationReachesTheServiceVerbatim pins the inbound half
+// of "one definition, identical behaviour on both paths": ntfy hands
+// ":hockey" to the service exactly as texted, so the same resolution the
+// CLI path gets happens here too. parseDirectives must not touch it -
+// the sigil is not a directive.
+func TestRun_StubInvocationReachesTheServiceVerbatim(t *testing.T) {
+	var (
+		mu        sync.Mutex
+		delivered bool
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			return
+		}
+
+		mu.Lock()
+		first := !delivered
+		delivered = true
+		mu.Unlock()
+		if first {
+			_, _ = io.WriteString(w, `{"event":"message","topic":"inbound-a","message":":hockey"}`+"\n")
+		}
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+
+	created := make(chan createCall, 4)
+	create := func(in service.CreateInput) (*reminder.Reminder, error) {
+		created <- createCall{text: in.Text, outbound: in.OutboundTopics, tags: in.Tags, priority: in.Priority}
+		return &reminder.Reminder{ID: "rem-1", Text: "back to the game", DueAt: time.Date(2026, 6, 15, 9, 15, 0, 0, time.UTC)}, nil
+	}
+
+	c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{createFn: create})
+	c.reconnectWait = time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		c.Run(ctx)
+	}()
+
+	select {
+	case call := <-created:
+		if call.text != ":hockey" {
+			t.Errorf("create text = %q, want %q passed through untouched for the service to resolve", call.text, ":hockey")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the create callback")
+	}
+
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+}
