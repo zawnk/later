@@ -50,6 +50,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -67,6 +68,7 @@ var (
 	ErrInvalidInput = errors.New("invalid input")
 	ErrNotFound     = errors.New("not found")
 	ErrStillPending = errors.New("still a pending reminder")
+	ErrPastDue      = errors.New("due time is in the past")
 )
 
 type Store interface {
@@ -75,9 +77,12 @@ type Store interface {
 	ListArchive() ([]reminder.ArchivedReminder, error)
 	CancelReminder(id string) (bool, error)
 	LoadStubs() (map[string]reminder.Stub, error)
+	SetStub(name string, stub reminder.Stub) error
+	DeleteStub(name string) (bool, error)
 }
 
 var stubInvocationRegex = regexp.MustCompile(`^:([A-Za-z][A-Za-z0-9_-]*)(?:\s|$)`)
+var stubNameRegex = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
 
 var singleUnitRegex = regexp.MustCompile(`(^|\s)(in|within) (\d+)(y|mo|w|d|h|m|s)\b`)
 var combinedDurationRegex = regexp.MustCompile(`(^|\s)((?:in |within )?(?:\d+(?:y|mo|w|d|h|m|s)){2,})\b`)
@@ -188,7 +193,7 @@ func (s *Service) ParseReminderText(text string) (task string, due time.Time, er
 
 	dueAt := parsedTime.Local().Round(time.Minute)
 	if dueAt.Before(s.now().Round(time.Minute)) {
-		return "", time.Time{}, fmt.Errorf("%w: due time %s is in the past", ErrInvalidInput, dueAt.Format(time.RFC3339))
+		return "", time.Time{}, fmt.Errorf("%w: %w (%s)", ErrInvalidInput, ErrPastDue, dueAt.Format(time.RFC3339))
 	}
 
 	return task, dueAt, nil
@@ -329,6 +334,89 @@ func (s *Service) resolveStub(in CreateInput) (CreateInput, error) {
 	}
 
 	return in, nil
+}
+
+// ListStubs returns every defined stub, each carrying its own name,
+// sorted alphabetically. The map the file stores has no order at all,
+// so the sort is what makes the listing deterministic.
+func (s *Service) ListStubs() ([]reminder.NamedStub, error) {
+	stubs, err := s.store.LoadStubs()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load stubs: %w", err)
+	}
+
+	named := make([]reminder.NamedStub, 0, len(stubs))
+	for name, stub := range stubs {
+		named = append(named, reminder.NamedStub{Name: name, Stub: stub})
+	}
+	slices.SortFunc(named, func(x, y reminder.NamedStub) int { return strings.Compare(x.Name, y.Name) })
+	return named, nil
+}
+
+// SetStub validates a definition and stores it under name, replacing
+// any stub already held there. Addressed by a caller-chosen name and
+// replacing wholesale, it is idempotent: the same write twice leaves
+// the same single entry, so there is no create-versus-conflict case.
+//
+// Validation is on the way in, and it is the only validation there is.
+func (s *Service) SetStub(name string, stub reminder.Stub) error {
+	if err := s.validateStub(name, stub); err != nil {
+		return err
+	}
+	if err := s.store.SetStub(name, stub); err != nil {
+		return fmt.Errorf("failed to store stub: %w", err)
+	}
+	return nil
+}
+
+// validateStub rejects anything that could never produce a reminder,
+// running the same checks CreateReminder's pipeline runs and in its
+// order, so a stub that stores cleanly is one an invocation can
+// actually use.
+//
+// Two checks are the stub surface's own. A stub-shaped body is rejected
+// because expansion happens once, so it could never resolve. And the
+// name must conform exactly - see stubNameRegex on why a write does not
+// fold case.
+func (s *Service) validateStub(name string, stub reminder.Stub) error {
+	if !stubNameRegex.MatchString(name) {
+		return fmt.Errorf("%w: stub name %q must be lowercase, start with a letter, and hold only letters, digits, '-' and '_'", ErrInvalidInput, name)
+	}
+	if stubInvocationRegex.MatchString(strings.TrimSpace(stub.Text)) {
+		return fmt.Errorf("%w: stub text %q is itself a stub invocation; stubs expand once, so it could never resolve", ErrInvalidInput, stub.Text)
+	}
+	if err := validateNotificationOptions(CreateInput{Priority: stub.Priority, Click: stub.Click}); err != nil {
+		return err
+	}
+	// Past-due is the one parse failure tolerated here. It says the text
+	// cannot be scheduled *right now*, not that it never could, and a
+	// stub is re-parsed on every invocation anyway - so rejecting it
+	// would only make whether "standup at 9am" can be defined depend on
+	// what time of day you happen to define it, returning 200 in the
+	// morning and 400 in the afternoon for byte-identical input.
+	//
+	// The cost is that a stub whose text can never be future ("buy milk
+	// yesterday") is now accepted. That is bounded: it fails at create
+	// time on every invocation, before anything is stored, so it can
+	// never put a broken record into pending.json.
+	if _, _, err := s.ParseReminderText(stub.Text); err != nil && !errors.Is(err, ErrPastDue) {
+		return err
+	}
+	return nil
+}
+
+// DeleteStub removes name, reporting ErrNotFound when there was nothing
+// to remove - consistent with cancelling a reminder that does not
+// exist.
+func (s *Service) DeleteStub(name string) error {
+	found, err := s.store.DeleteStub(name)
+	if err != nil {
+		return fmt.Errorf("failed to delete stub: %w", err)
+	}
+	if !found {
+		return fmt.Errorf("stub %q %w", name, ErrNotFound)
+	}
+	return nil
 }
 
 // newReminder assembles the stored record out of an already-validated

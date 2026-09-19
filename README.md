@@ -274,6 +274,9 @@ Token-based auth (`Authorization: Bearer <token>`), JSON in and out.
 | `DELETE` | `/reminders/{id}` | Cancel a pending reminder. |
 | `POST` | `/reminders/{id}/postpone?duration=1h` | `duration` is a query param - compact or natural language. |
 | `POST` | `/reminders/{id}/dismiss` | Clears the fired notification across every subscribed device (ntfy server-side, not just the calling client). `{id}` must be archived. |
+| `GET` | `/stubs` | List every stub, alphabetically. Each object carries its own `name`. |
+| `PUT` | `/stubs/{name}` | Create or replace a stub. Body: `{"text": "...", "tags": [...], "priority": "...", "click": "..."}` - of the fields, only `text` is required, and it must parse the same way a reminder's does - except that a time already past today (`standup at 9am`, defined at 10am) is accepted, since a stub is re-parsed on every use. `{name}` must be lowercase, letter-initial, `[a-z][a-z0-9_-]*` - `PUT /stubs/Hockey` is a `400` |
+| `DELETE` | `/stubs/{name}` | Delete a stub. |
 | `POST` | `/test/parse` | Preview parsing. Body: `{"text": "..."}`. Creates nothing. |
 | `GET` | `/healthz` | No token needed. |
 

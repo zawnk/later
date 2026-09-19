@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zawnk/later/internal/reminder"
 	"github.com/zawnk/later/internal/store"
 )
 
@@ -77,5 +78,45 @@ func TestCreateReminder_StubsFileAbsentOrMalformed(t *testing.T) {
 				t.Errorf("CreateReminder() error = %v, want it to mention %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// TestStubCRUD_OverTheDataDir walks define -> list -> invoke -> delete
+// against the real store, so the write side and the read side are
+// checked to agree on the file rather than only on a double of it.
+func TestStubCRUD_OverTheDataDir(t *testing.T) {
+	svc := newServiceOverDataDir(t, "")
+
+	if err := svc.SetStub("hockey", reminder.Stub{Text: "in 15m back to the game", Tags: []string{"hockey"}, Priority: "high"}); err != nil {
+		t.Fatalf("SetStub() error = %v", err)
+	}
+	if err := svc.SetStub("laundry", reminder.Stub{Text: "in 45m move the laundry"}); err != nil {
+		t.Fatalf("SetStub() error = %v", err)
+	}
+
+	stubs, err := svc.ListStubs()
+	if err != nil {
+		t.Fatalf("ListStubs() error = %v", err)
+	}
+	if len(stubs) != 2 || stubs[0].Name != "hockey" || stubs[1].Name != "laundry" {
+		t.Fatalf("ListStubs() = %+v, want hockey then laundry", stubs)
+	}
+
+	rem, err := svc.CreateReminder(CreateInput{Text: ":hockey"})
+	if err != nil {
+		t.Fatalf("CreateReminder(\":hockey\") error = %v, want the stub just written to be invocable", err)
+	}
+	if rem.Text != "back to the game" || rem.Priority != "high" {
+		t.Errorf("CreateReminder() = %q/%q, want the written stub's text and priority", rem.Text, rem.Priority)
+	}
+
+	if err := svc.DeleteStub("hockey"); err != nil {
+		t.Fatalf("DeleteStub() error = %v", err)
+	}
+	if _, err := svc.CreateReminder(CreateInput{Text: ":hockey"}); err == nil {
+		t.Error("CreateReminder(\":hockey\") succeeded after the delete, want an unknown-stub error")
+	}
+	if _, err := svc.CreateReminder(CreateInput{Text: ":laundry"}); err != nil {
+		t.Errorf("CreateReminder(\":laundry\") error = %v, want the untouched sibling to survive the delete", err)
 	}
 }

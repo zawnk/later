@@ -207,6 +207,20 @@ func (s *stubStore) CancelReminder(id string) (bool, error) { return false, nil 
 func (s *stubStore) LoadStubs() (map[string]reminder.Stub, error) {
 	return s.stubDefs, nil
 }
+func (s *stubStore) SetStub(name string, stub reminder.Stub) error {
+	if s.stubDefs == nil {
+		s.stubDefs = map[string]reminder.Stub{}
+	}
+	s.stubDefs[name] = stub
+	return nil
+}
+func (s *stubStore) DeleteStub(name string) (bool, error) {
+	if _, ok := s.stubDefs[name]; !ok {
+		return false, nil
+	}
+	delete(s.stubDefs, name)
+	return true, nil
+}
 
 func TestCreateReminder_TopicScoping(t *testing.T) {
 	cfg := &config.Config{
@@ -1298,5 +1312,245 @@ func TestCreateReminder_UnknownStubIsABadRequest(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "unknown stub") {
 		t.Errorf("body = %s, want it to say the stub is unknown", rr.Body.String())
+	}
+}
+
+// stubsConfig is the auth config the stub endpoint tests share: one
+// ordinary bearer token, the same one that can create reminders.
+func stubsConfig() *config.Config {
+	return &config.Config{
+		AuthTokens: []config.Token{{Token: "valid-token", Outbound: []string{"topic-a"}}},
+	}
+}
+
+func TestListStubs(t *testing.T) {
+	store := &stubStore{stubDefs: map[string]reminder.Stub{
+		"laundry": {Text: "in 45m move the laundry"},
+		"hockey":  {Text: "in 15m back to the game", Tags: []string{"hockey"}, Priority: "high", Click: "https://example.com/game"},
+		"bins":    {Text: "in 1d take the bins out"},
+	}}
+	a := New(stubsConfig(), service.New(store), testActionSecret, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/stubs", nil)
+	req.Header.Set("Authorization", "Bearer valid-token")
+	rr := httptest.NewRecorder()
+	a.Routes().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (body: %s)", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var got []reminder.NamedStub
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding response as an array: %v (body: %s)", err, rr.Body.String())
+	}
+
+	want := []reminder.NamedStub{
+		{Name: "bins", Stub: reminder.Stub{Text: "in 1d take the bins out"}},
+		{Name: "hockey", Stub: reminder.Stub{Text: "in 15m back to the game", Tags: []string{"hockey"}, Priority: "high", Click: "https://example.com/game"}},
+		{Name: "laundry", Stub: reminder.Stub{Text: "in 45m move the laundry"}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("GET /stubs = %+v, want %+v - every stub's own fields, alphabetical by name", got, want)
+	}
+
+	if strings.Contains(rr.Body.String(), "outbound_topics") {
+		t.Errorf("body = %s, want no outbound_topics; stubs never carry routing", rr.Body.String())
+	}
+}
+
+func TestListStubs_NoneDefined(t *testing.T) {
+	a := New(stubsConfig(), service.New(&stubStore{}), testActionSecret, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/stubs", nil)
+	req.Header.Set("Authorization", "Bearer valid-token")
+	rr := httptest.NewRecorder()
+	a.Routes().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	if got := strings.TrimSpace(rr.Body.String()); got != "[]" {
+		t.Errorf("body = %s, want an empty array rather than null", got)
+	}
+}
+
+func TestSetStub_RoundtripsAndIsIdempotent(t *testing.T) {
+	store := &stubStore{}
+	a := New(stubsConfig(), service.New(store), testActionSecret, nil)
+
+	body := `{"text":"in 15m back to the game","tags":["hockey"],"priority":"high","click":"https://example.com/game"}`
+	want := reminder.Stub{
+		Text:     "in 15m back to the game",
+		Tags:     []string{"hockey"},
+		Priority: "high",
+		Click:    "https://example.com/game",
+	}
+
+	for _, attempt := range []string{"create", "replace with the same body"} {
+		req := httptest.NewRequest(http.MethodPut, "/stubs/hockey", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer valid-token")
+		rr := httptest.NewRecorder()
+		a.Routes().ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d, want %d (body: %s)", attempt, rr.Code, http.StatusOK, rr.Body.String())
+		}
+
+		var got reminder.NamedStub
+		if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+			t.Fatalf("%s: decoding response: %v", attempt, err)
+		}
+		if got.Name != "hockey" || !reflect.DeepEqual(got.Stub, want) {
+			t.Errorf("%s: response = %+v, want the stored stub under name hockey: %+v", attempt, got, want)
+		}
+
+		if len(store.stubDefs) != 1 {
+			t.Fatalf("%s: store holds %d stubs, want 1 - PUT is addressed by name and replaces wholesale", attempt, len(store.stubDefs))
+		}
+		if !reflect.DeepEqual(store.stubDefs["hockey"], want) {
+			t.Errorf("%s: stored = %+v, want %+v", attempt, store.stubDefs["hockey"], want)
+		}
+	}
+}
+
+func TestSetStub_ReplacesRatherThanMerges(t *testing.T) {
+	store := &stubStore{stubDefs: map[string]reminder.Stub{
+		"hockey": {Text: "in 15m back to the game", Tags: []string{"hockey"}, Priority: "high"},
+	}}
+	a := New(stubsConfig(), service.New(store), testActionSecret, nil)
+
+	req := httptest.NewRequest(http.MethodPut, "/stubs/hockey", strings.NewReader(`{"text":"in 20m back to the game"}`))
+	req.Header.Set("Authorization", "Bearer valid-token")
+	rr := httptest.NewRecorder()
+	a.Routes().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (body: %s)", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	got := store.stubDefs["hockey"]
+	if got.Text != "in 20m back to the game" || got.Tags != nil || got.Priority != "" {
+		t.Errorf("stored = %+v, want the new body wholesale, carrying nothing over from the old one", got)
+	}
+}
+
+func TestSetStub_RejectsBadWrites(t *testing.T) {
+	tests := []struct {
+		name    string
+		path    string
+		body    string
+		wantErr string
+	}{
+		{"unparseable text", "/stubs/hockey", `{"text":"back to the game"}`, "no time information found"},
+		{"empty text", "/stubs/hockey", `{"text":""}`, "empty reminder text"},
+		{"invalid priority", "/stubs/hockey", `{"text":"in 15m back to the game","priority":"loudest"}`, "invalid priority"},
+		{"non-absolute click", "/stubs/hockey", `{"text":"in 15m back to the game","click":"/game"}`, "absolute URL"},
+		{"mixed-case name", "/stubs/Hockey", `{"text":"in 15m back to the game"}`, "stub name"},
+		{"digit-initial name", "/stubs/30", `{"text":"in 15m back to the game"}`, "stub name"},
+		{"stub-shaped body", "/stubs/hockey", `{"text":":laundry"}`, "expand"},
+		{"unknown field in body", "/stubs/hockey", `{"text":"in 15m back to the game","outbound_topics":["topic-a"]}`, "invalid request body"},
+		{"not json at all", "/stubs/hockey", `not json`, "invalid request body"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &stubStore{}
+			a := New(stubsConfig(), service.New(store), testActionSecret, nil)
+
+			req := httptest.NewRequest(http.MethodPut, tt.path, strings.NewReader(tt.body))
+			req.Header.Set("Authorization", "Bearer valid-token")
+			rr := httptest.NewRecorder()
+			a.Routes().ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d (body: %s)", rr.Code, http.StatusBadRequest, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), tt.wantErr) {
+				t.Errorf("body = %s, want it to mention %q", rr.Body.String(), tt.wantErr)
+			}
+			if len(store.stubDefs) != 0 {
+				t.Errorf("store holds %d stubs after a rejected write, want 0", len(store.stubDefs))
+			}
+		})
+	}
+}
+
+func TestDeleteStub(t *testing.T) {
+	store := &stubStore{stubDefs: map[string]reminder.Stub{"hockey": {Text: "in 15m back to the game"}}}
+	a := New(stubsConfig(), service.New(store), testActionSecret, nil)
+
+	req := httptest.NewRequest(http.MethodDelete, "/stubs/hockey", nil)
+	req.Header.Set("Authorization", "Bearer valid-token")
+	rr := httptest.NewRecorder()
+	a.Routes().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d (body: %s)", rr.Code, http.StatusNoContent, rr.Body.String())
+	}
+	if len(store.stubDefs) != 0 {
+		t.Errorf("store holds %d stubs after the delete, want 0", len(store.stubDefs))
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/stubs/hockey", nil)
+	req.Header.Set("Authorization", "Bearer valid-token")
+	rr = httptest.NewRecorder()
+	a.Routes().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("deleting an absent stub: status = %d, want %d, consistent with deleting a reminder", rr.Code, http.StatusNotFound)
+	}
+}
+
+// TestStubEndpoints_Auth pins the auth decision: ordinary bearer auth,
+// no new privilege tier and no action-token scope. A token that can
+// create reminders can define stubs; a scoped action token cannot,
+// however it was minted.
+func TestStubEndpoints_Auth(t *testing.T) {
+	requests := []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodGet, "/stubs", ""},
+		{http.MethodPut, "/stubs/hockey", `{"text":"in 15m back to the game"}`},
+		{http.MethodDelete, "/stubs/hockey", ""},
+	}
+
+	for _, action := range []string{"postpone", "clear"} {
+		actionTok, err := actiontoken.Mint(testActionSecret, "hockey", action)
+		if err != nil {
+			t.Fatalf("minting a %q action token: %v", action, err)
+		}
+
+		for _, tt := range requests {
+			t.Run(tt.method+" "+tt.path+" rejects a "+action+" action token", func(t *testing.T) {
+				store := &stubStore{stubDefs: map[string]reminder.Stub{"hockey": {Text: "in 15m back to the game"}}}
+				a := New(stubsConfig(), service.New(store), testActionSecret, nil)
+
+				req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+				req.Header.Set("Authorization", "Bearer "+actionTok)
+				rr := httptest.NewRecorder()
+				a.Routes().ServeHTTP(rr, req)
+
+				if rr.Code != http.StatusUnauthorized {
+					t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+				}
+			})
+		}
+	}
+
+	for _, tt := range requests {
+		t.Run(tt.method+" "+tt.path+" rejects a missing token", func(t *testing.T) {
+			a := New(stubsConfig(), service.New(&stubStore{}), testActionSecret, nil)
+
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			rr := httptest.NewRecorder()
+			a.Routes().ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusUnauthorized {
+				t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+			}
+		})
 	}
 }

@@ -73,3 +73,13 @@ type Stub struct {
 	Priority string   `json:"priority,omitempty"`
 	Click    string   `json:"click,omitempty"`
 }
+
+// NamedStub is a Stub carrying the name it is stored under. The stubs
+// file is a map keyed by name, which gives name-uniqueness structurally
+// but leaves the name outside the value; every surface that hands a
+// stub back to a caller has to put it back in. The embedded Stub
+// inlines its own fields, so the JSON is one flat object.
+type NamedStub struct {
+	Name string `json:"name"`
+	Stub
+}
