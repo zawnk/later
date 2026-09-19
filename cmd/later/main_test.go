@@ -1299,3 +1299,339 @@ func TestSaveAndResolveLastID(t *testing.T) {
 		t.Errorf(`resolveID("last") = %q, want %q`, id, "def456")
 	}
 }
+
+func TestStubListPrintsEachStubWithItsExpansion(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/stubs" {
+			t.Errorf("request = %s %s, want GET /stubs", r.Method, r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode([]reminder.NamedStub{
+			{Name: "hockey", Stub: reminder.Stub{Text: "in 15m back to the game", Tags: []string{"hockey"}, Priority: "high"}},
+			{Name: "standup", Stub: reminder.Stub{Text: "at 9am standup"}},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "stub", "list"); err != nil {
+		t.Fatalf("runCLI() error = %v", err)
+	}
+
+	got := out.String()
+	for _, want := range []string{":hockey", "in 15m back to the game", "#hockey", "high", ":standup", "at 9am standup"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output = %q, want it to contain %q", got, want)
+		}
+	}
+}
+
+func TestStubListJSONEmitsAnArray(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]reminder.NamedStub{
+			{Name: "hockey", Stub: reminder.Stub{Text: "in 15m back to the game", Tags: []string{"hockey"}}},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "--json", "stub", "list"); err != nil {
+		t.Fatalf("runCLI() error = %v", err)
+	}
+
+	var got []reminder.NamedStub
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("output %q is not a JSON array: %v", out.String(), err)
+	}
+
+	if len(got) != 1 || got[0].Name != "hockey" || got[0].Text != "in 15m back to the game" {
+		t.Errorf("decoded = %+v, want the server's stub list round-tripped", got)
+	}
+}
+
+func TestStubListJSONEmptyIsAnArrayNotNull(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`null`))
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "--json", "stub", "list"); err != nil {
+		t.Fatalf("runCLI() error = %v", err)
+	}
+
+	if strings.TrimSpace(out.String()) != "[]" {
+		t.Errorf("output = %q, want an empty JSON array", out.String())
+	}
+}
+
+func TestStubListWithNoStubsSaysSo(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "stub", "list"); err != nil {
+		t.Fatalf("runCLI() error = %v", err)
+	}
+
+	if !strings.Contains(out.String(), "no stubs") {
+		t.Errorf("output = %q, want it to say there are no stubs", out.String())
+	}
+}
+
+func TestStubSetPutsTheStubUnderItsName(t *testing.T) {
+	var gotMethod, gotPath, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		_ = json.NewEncoder(w).Encode(reminder.NamedStub{
+			Name: "hockey",
+			Stub: reminder.Stub{Text: "in 15m back to the game", Tags: []string{"hockey", "sports"}, Priority: "high", Click: "https://example.com/game"},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	err := runCLI(t, a, "stub", "set", "hockey", "--tag", "hockey,sports", "--priority", "high", "--click", "https://example.com/game", "in", "15m", "back", "to", "the", "game")
+	if err != nil {
+		t.Fatalf("runCLI() error = %v", err)
+	}
+
+	if gotMethod != http.MethodPut || gotPath != "/stubs/hockey" {
+		t.Errorf("request = %s %s, want PUT /stubs/hockey", gotMethod, gotPath)
+	}
+
+	want := `{"text":"in 15m back to the game","tags":["hockey","sports"],"priority":"high","click":"https://example.com/game"}`
+	if gotBody != want {
+		t.Errorf("body = %s, want %s", gotBody, want)
+	}
+
+	if !strings.Contains(out.String(), ":hockey") || !strings.Contains(out.String(), "in 15m back to the game") {
+		t.Errorf("output = %q, want it to confirm the stub and its expansion", out.String())
+	}
+}
+
+func TestStubSetOmitsUnsetFlagsFromTheBody(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		_ = json.NewEncoder(w).Encode(reminder.NamedStub{Name: "laundry", Stub: reminder.Stub{Text: "in 45m move the laundry"}})
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "stub", "set", "laundry", "in", "45m", "move", "the", "laundry"); err != nil {
+		t.Fatalf("runCLI() error = %v", err)
+	}
+
+	if gotBody != `{"text":"in 45m move the laundry"}` {
+		t.Errorf("body = %s, want text only", gotBody)
+	}
+}
+
+func TestStubSetJSONEmitsTheStoredStub(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(reminder.NamedStub{Name: "laundry", Stub: reminder.Stub{Text: "in 45m move the laundry"}})
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "--json", "stub", "set", "laundry", "in", "45m", "move", "the", "laundry"); err != nil {
+		t.Fatalf("runCLI() error = %v", err)
+	}
+
+	var got reminder.NamedStub
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("output %q is not a JSON object: %v", out.String(), err)
+	}
+
+	if got.Name != "laundry" || got.Text != "in 45m move the laundry" {
+		t.Errorf("decoded = %+v, want the stored stub", got)
+	}
+}
+
+func TestStubSetSurfacesARejectedWrite(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"stub name must be lowercase and start with a letter"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	err := runCLI(t, a, "stub", "set", "Hockey", "in", "15m", "back", "to", "the", "game")
+	if err == nil {
+		t.Fatal("runCLI() error = nil, want the server's rejection")
+	}
+
+	if !strings.Contains(err.Error(), "must be lowercase") {
+		t.Errorf("error = %q, want the server's message, not a raw status code", err)
+	}
+}
+
+func TestStubSetRequiresText(t *testing.T) {
+	var out bytes.Buffer
+	a := &app{out: &out, url: "http://unused.invalid", token: "tk_test"}
+
+	if err := runCLI(t, a, "stub", "set", "hockey"); err == nil {
+		t.Fatal("runCLI() error = nil, want an error for a stub with no text")
+	}
+}
+
+func TestStubDelDeletesTheStub(t *testing.T) {
+	var gotMethod, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "stub", "del", "hockey"); err != nil {
+		t.Fatalf("runCLI() error = %v", err)
+	}
+
+	if gotMethod != http.MethodDelete || gotPath != "/stubs/hockey" {
+		t.Errorf("request = %s %s, want DELETE /stubs/hockey", gotMethod, gotPath)
+	}
+
+	if !strings.Contains(out.String(), ":hockey") || !strings.Contains(out.String(), "deleted") {
+		t.Errorf("output = %q, want it to confirm the deletion", out.String())
+	}
+}
+
+func TestStubDelReportsAnUnknownName(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"stub \"hokey\" not found"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	err := runCLI(t, a, "stub", "del", "hokey")
+	if err == nil {
+		t.Fatal("runCLI() error = nil, want a clear message for an unknown stub")
+	}
+
+	if !strings.Contains(err.Error(), "hokey") || strings.Contains(err.Error(), "404") {
+		t.Errorf("error = %q, want the server's message naming the stub, not a raw status code", err)
+	}
+}
+
+func TestStubNameAcceptsTheSigilTheListPrints(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(reminder.NamedStub{Name: "hockey", Stub: reminder.Stub{Text: "in 15m back to the game"}})
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "stub", "set", ":hockey", "in", "15m", "back", "to", "the", "game"); err != nil {
+		t.Fatalf("runCLI() set error = %v", err)
+	}
+
+	if err := runCLI(t, a, "stub", "del", ":hockey"); err != nil {
+		t.Fatalf("runCLI() del error = %v", err)
+	}
+
+	for _, p := range paths {
+		if p != "/stubs/hockey" {
+			t.Errorf("request path = %q, want the sigil stripped from the name", p)
+		}
+	}
+}
+
+func TestStubListReadsTheDocumentedWireShape(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A raw literal, not an encoded NamedStub: a renamed json tag
+		// would round-trip through the type and hide the change. The
+		// list is an array and each entry is one flat object whose name
+		// sits alongside the stub's own fields.
+		_, _ = w.Write([]byte(`[{"name":"hockey","text":"in 15m back to the game","tags":["hockey"],"priority":"high","click":"https://example.com/game"}]`))
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "stub", "list"); err != nil {
+		t.Fatalf("runCLI(\"stub list\") error = %v", err)
+	}
+
+	got := out.String()
+	for _, want := range []string{":hockey", "#hockey", "high", "in 15m back to the game"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output = %q, want it to contain %q", got, want)
+		}
+	}
+}
+
+func TestStubSetEchoesTheClickItStored(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"name":"hockey","text":"in 15m back to the game","click":"https://example.com/game"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	err := runCLI(t, a, "stub", "set", "hockey", "--click", "https://example.com/game", "in", "15m", "back", "to", "the", "game")
+	if err != nil {
+		t.Fatalf("runCLI(\"stub set\") error = %v", err)
+	}
+
+	if !strings.Contains(out.String(), "https://example.com/game") {
+		t.Errorf("output = %q, want it to echo the click URL the write stored", out.String())
+	}
+}
+
+func TestStubRmIsAnAliasForDel(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	a := &app{out: &out, url: srv.URL, token: "tk_test"}
+
+	if err := runCLI(t, a, "stub", "rm", "hockey"); err != nil {
+		t.Fatalf("runCLI(\"stub rm\") error = %v", err)
+	}
+
+	if gotPath != "/stubs/hockey" {
+		t.Errorf("request path = %q, want rm to route to the same delete as del", gotPath)
+	}
+}
