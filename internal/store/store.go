@@ -212,6 +212,7 @@ func (s *Store) loadStubs() (map[string]reminder.Stub, error) {
 
 // SetStub stores stub under name in stubs.json, creating the file if it
 // is absent and replacing any definition already held under that name.
+// It reports whether the name was new.
 //
 // The lock spans the whole read-modify-write, not just the write: each
 // write rewrites the entire map, so a lock held only around writeAtomic
@@ -219,16 +220,17 @@ func (s *Store) loadStubs() (map[string]reminder.Stub, error) {
 // map and the later one drop the earlier one's stub. It is a lock of
 // its own rather than the pending mutex because the two guard
 // unrelated files.
-func (s *Store) SetStub(name string, stub reminder.Stub) error {
+func (s *Store) SetStub(name string, stub reminder.Stub) (bool, error) {
 	s.stubsMu.Lock()
 	defer s.stubsMu.Unlock()
 
 	stubs, err := s.loadStubs()
 	if err != nil {
-		return err
+		return false, err
 	}
+	_, existed := stubs[name]
 	stubs[name] = stub
-	return s.saveStubs(stubs)
+	return !existed, s.saveStubs(stubs)
 }
 
 // DeleteStub removes name from stubs.json, reporting whether it was

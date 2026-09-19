@@ -77,7 +77,7 @@ type Store interface {
 	ListArchive() ([]reminder.ArchivedReminder, error)
 	CancelReminder(id string) (bool, error)
 	LoadStubs() (map[string]reminder.Stub, error)
-	SetStub(name string, stub reminder.Stub) error
+	SetStub(name string, stub reminder.Stub) (created bool, err error)
 	DeleteStub(name string) (bool, error)
 }
 
@@ -358,15 +358,21 @@ func (s *Service) ListStubs() ([]reminder.NamedStub, error) {
 // replacing wholesale, it is idempotent: the same write twice leaves
 // the same single entry, so there is no create-versus-conflict case.
 //
+// It reports whether the name was new. That is not a conflict signal -
+// both outcomes are a successful write - it is what lets a surface
+// confirming the write say "created" or "updated", so a mistyped name
+// does not read like an edit of the stub that was meant.
+//
 // Validation is on the way in, and it is the only validation there is.
-func (s *Service) SetStub(name string, stub reminder.Stub) error {
+func (s *Service) SetStub(name string, stub reminder.Stub) (bool, error) {
 	if err := s.validateStub(name, stub); err != nil {
-		return err
+		return false, err
 	}
-	if err := s.store.SetStub(name, stub); err != nil {
-		return fmt.Errorf("failed to store stub: %w", err)
+	created, err := s.store.SetStub(name, stub)
+	if err != nil {
+		return false, fmt.Errorf("failed to store stub: %w", err)
 	}
-	return nil
+	return created, nil
 }
 
 // validateStub rejects anything that could never produce a reminder,

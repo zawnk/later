@@ -87,10 +87,10 @@ func TestCreateReminder_StubsFileAbsentOrMalformed(t *testing.T) {
 func TestStubCRUD_OverTheDataDir(t *testing.T) {
 	svc := newServiceOverDataDir(t, "")
 
-	if err := svc.SetStub("hockey", reminder.Stub{Text: "in 15m back to the game", Tags: []string{"hockey"}, Priority: "high"}); err != nil {
+	if _, err := svc.SetStub("hockey", reminder.Stub{Text: "in 15m back to the game", Tags: []string{"hockey"}, Priority: "high"}); err != nil {
 		t.Fatalf("SetStub() error = %v", err)
 	}
-	if err := svc.SetStub("laundry", reminder.Stub{Text: "in 45m move the laundry"}); err != nil {
+	if _, err := svc.SetStub("laundry", reminder.Stub{Text: "in 45m move the laundry"}); err != nil {
 		t.Fatalf("SetStub() error = %v", err)
 	}
 

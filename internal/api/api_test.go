@@ -207,12 +207,13 @@ func (s *stubStore) CancelReminder(id string) (bool, error) { return false, nil 
 func (s *stubStore) LoadStubs() (map[string]reminder.Stub, error) {
 	return s.stubDefs, nil
 }
-func (s *stubStore) SetStub(name string, stub reminder.Stub) error {
+func (s *stubStore) SetStub(name string, stub reminder.Stub) (bool, error) {
 	if s.stubDefs == nil {
 		s.stubDefs = map[string]reminder.Stub{}
 	}
+	_, existed := s.stubDefs[name]
 	s.stubDefs[name] = stub
-	return nil
+	return !existed, nil
 }
 func (s *stubStore) DeleteStub(name string) (bool, error) {
 	if _, ok := s.stubDefs[name]; !ok {

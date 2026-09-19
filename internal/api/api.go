@@ -408,7 +408,7 @@ func (a *API) setStub(w http.ResponseWriter, r *http.Request) {
 
 	name := r.PathValue("name")
 	stub := reminder.Stub{Text: body.Text, Tags: body.Tags, Priority: body.Priority, Click: body.Click}
-	if err := a.svc.SetStub(name, stub); err != nil {
+	if _, err := a.svc.SetStub(name, stub); err != nil {
 		writeServiceError(w, err, "failed to store stub")
 		return
 	}

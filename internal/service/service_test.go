@@ -34,15 +34,16 @@ func (m *mockStore) ListArchive() ([]reminder.ArchivedReminder, error) {
 	return m.archive, m.archiveErr
 }
 func (m *mockStore) CancelReminder(id string) (bool, error) { return false, nil }
-func (m *mockStore) SetStub(name string, stub reminder.Stub) error {
+func (m *mockStore) SetStub(name string, stub reminder.Stub) (bool, error) {
 	if m.stubsErr != nil {
-		return m.stubsErr
+		return false, m.stubsErr
 	}
 	if m.stubs == nil {
 		m.stubs = map[string]reminder.Stub{}
 	}
+	_, existed := m.stubs[name]
 	m.stubs[name] = stub
-	return nil
+	return !existed, nil
 }
 
 func (m *mockStore) DeleteStub(name string) (bool, error) {
@@ -1673,7 +1674,7 @@ func TestSetStub_StoresTheDefinition(t *testing.T) {
 		Priority: "high",
 		Click:    "https://example.com/game",
 	}
-	if err := svc.SetStub("hockey", stub); err != nil {
+	if _, err := svc.SetStub("hockey", stub); err != nil {
 		t.Fatalf("SetStub() error = %v", err)
 	}
 
@@ -1682,11 +1683,35 @@ func TestSetStub_StoresTheDefinition(t *testing.T) {
 	}
 
 	// Idempotency
-	if err := svc.SetStub("hockey", stub); err != nil {
+	if _, err := svc.SetStub("hockey", stub); err != nil {
 		t.Fatalf("SetStub() (again) error = %v", err)
 	}
 	if len(store.stubs) != 1 {
 		t.Errorf("store holds %d stubs after two identical writes, want 1", len(store.stubs))
+	}
+}
+
+// TestSetStub_ReportsWhetherItCreated pins the created-versus-updated
+// signal the ntfy "/stub" confirmation reads, so a mistyped name shows
+// as a new stub rather than silently reading like an edit of the one
+// that was meant.
+func TestSetStub_ReportsWhetherItCreated(t *testing.T) {
+	svc := newStubService(&mockStore{})
+
+	created, err := svc.SetStub("hockey", reminder.Stub{Text: "in 15m back to the game"})
+	if err != nil {
+		t.Fatalf("SetStub() error = %v", err)
+	}
+	if !created {
+		t.Error("SetStub() created = false for a new name, want true")
+	}
+
+	created, err = svc.SetStub("hockey", reminder.Stub{Text: "in 20m back to the game"})
+	if err != nil {
+		t.Fatalf("SetStub() (replacing) error = %v", err)
+	}
+	if created {
+		t.Error("SetStub() created = true when replacing, want false")
 	}
 }
 
@@ -1764,7 +1789,7 @@ func TestSetStub_RejectsBadInput(t *testing.T) {
 			store := &mockStore{}
 			svc := newStubService(store)
 
-			err := svc.SetStub(tt.stubName, tt.stub)
+			_, err := svc.SetStub(tt.stubName, tt.stub)
 			if err == nil {
 				t.Fatalf("SetStub(%q, %+v) error = nil, want one mentioning %q", tt.stubName, tt.stub, tt.wantErr)
 			}
@@ -1794,7 +1819,7 @@ func TestSetStub_DefinitionDoesNotDependOnTheWallClock(t *testing.T) {
 	// 10:00, an hour after the stub's own time has passed for the day.
 	svc.now = func() time.Time { return time.Date(2026, 6, 15, 10, 0, 0, 0, time.Local) }
 
-	if err := svc.SetStub("standup", reminder.Stub{Text: "standup at 9am"}); err != nil {
+	if _, err := svc.SetStub("standup", reminder.Stub{Text: "standup at 9am"}); err != nil {
 		t.Fatalf("SetStub() error = %v, want a clock-time stub definable at any hour", err)
 	}
 	if store.stubs["standup"].Text != "standup at 9am" {
@@ -1815,7 +1840,7 @@ func TestSetStub_AcceptsEveryValidNameShape(t *testing.T) {
 	for _, name := range []string{"h", "hockey", "ice-hockey", "ice_hockey", "hockey2"} {
 		t.Run(name, func(t *testing.T) {
 			svc := newStubService(&mockStore{})
-			if err := svc.SetStub(name, reminder.Stub{Text: "in 15m back to the game"}); err != nil {
+			if _, err := svc.SetStub(name, reminder.Stub{Text: "in 15m back to the game"}); err != nil {
 				t.Errorf("SetStub(%q) error = %v, want it accepted", name, err)
 			}
 		})

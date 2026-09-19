@@ -2,11 +2,13 @@ package ntfy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -23,8 +25,32 @@ import (
 var testActionSecret = []byte("test-action-secret")
 
 type stubReminderService struct {
-	createFn  func(service.CreateInput) (*reminder.Reminder, error)
-	previewFn func(string) (string, time.Time, error)
+	createFn     func(service.CreateInput) (*reminder.Reminder, error)
+	previewFn    func(string) (string, time.Time, error)
+	listStubsFn  func() ([]reminder.NamedStub, error)
+	setStubFn    func(string, reminder.Stub) (bool, error)
+	deleteStubFn func(string) error
+}
+
+func (s *stubReminderService) ListStubs() ([]reminder.NamedStub, error) {
+	if s.listStubsFn == nil {
+		return nil, errors.New("ListStubs not expected in this test")
+	}
+	return s.listStubsFn()
+}
+
+func (s *stubReminderService) SetStub(name string, stub reminder.Stub) (bool, error) {
+	if s.setStubFn == nil {
+		return false, errors.New("SetStub not expected in this test")
+	}
+	return s.setStubFn(name, stub)
+}
+
+func (s *stubReminderService) DeleteStub(name string) error {
+	if s.deleteStubFn == nil {
+		return errors.New("DeleteStub not expected in this test")
+	}
+	return s.deleteStubFn(name)
 }
 
 func (s *stubReminderService) CreateReminder(in service.CreateInput) (*reminder.Reminder, error) {
@@ -41,33 +67,105 @@ func (s *stubReminderService) PreviewReminderText(text string) (string, time.Tim
 	return s.previewFn(text)
 }
 
-func TestCutTestPrefix(t *testing.T) {
+func TestCutCommand(t *testing.T) {
 	tests := []struct {
 		name     string
 		text     string
+		wantVerb string
 		wantRest string
 		wantOK   bool
 	}{
-		{"bare /test with nothing after", "/test", "", true},
-		{"bare /test with surrounding whitespace", "  /test  ", "", true},
-		{"/test with text after", "/test buy milk tomorrow", "buy milk tomorrow", true},
-		{"case-insensitive, matching phone autocapitalize", "/Test tomorrow", "tomorrow", true},
-		{"/TEST all caps", "/TEST tomorrow", "tomorrow", true},
-		{"not a trigger at all", "buy milk tomorrow", "", false},
-		{"a word merely containing test is not a match", "/testing tomorrow", "", false},
-		{"empty string", "", "", false},
+		{"bare /test with nothing after", "/test", "/test", "", true},
+		{"bare /test with surrounding whitespace", "  /test  ", "/test", "", true},
+		{"/test with text after", "/test buy milk tomorrow", "/test", "buy milk tomorrow", true},
+		{"case-insensitive, matching phone autocapitalize", "/Test tomorrow", "/test", "tomorrow", true},
+		{"/TEST all caps", "/TEST tomorrow", "/test", "tomorrow", true},
+		{"the verb is lowered but its arguments are not", "/stub Hockey in 15m", "/stub", "Hockey in 15m", true},
+		{"/stub and /stubs are separate verbs", "/stubs", "/stubs", "", true},
+		{"unknown verbs are still commands; the table decides", "/nope tomorrow", "/nope", "tomorrow", true},
+		{"not a command at all", "buy milk tomorrow", "", "", false},
+		{"a mid-text slash word is not a command", "buy milk /test", "", "", false},
+		{"empty string", "", "", "", false},
+		{"a bare slash", "/", "/", "", true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rest, ok := cutTestPrefix(tt.text)
+			verb, rest, ok := cutCommand(tt.text)
 			if ok != tt.wantOK {
-				t.Fatalf("cutTestPrefix(%q) ok = %v, want %v", tt.text, ok, tt.wantOK)
+				t.Fatalf("cutCommand(%q) ok = %v, want %v", tt.text, ok, tt.wantOK)
+			}
+			if verb != tt.wantVerb {
+				t.Errorf("cutCommand(%q) verb = %q, want %q", tt.text, verb, tt.wantVerb)
 			}
 			if rest != tt.wantRest {
-				t.Errorf("cutTestPrefix(%q) rest = %q, want %q", tt.text, rest, tt.wantRest)
+				t.Errorf("cutCommand(%q) rest = %q, want %q", tt.text, rest, tt.wantRest)
 			}
 		})
+	}
+}
+
+// deliverInbound runs Run against a subscription that delivers exactly
+// one inbound message, and returns the first reply the client publishes
+// back. It is the seam the command table is tested at: a real message
+// off the wire in, a real reply out.
+func deliverInbound(t *testing.T, svc ReminderService, message string) recordedRequest {
+	t.Helper()
+
+	var (
+		mu        sync.Mutex
+		delivered bool
+	)
+	replied := make(chan recordedRequest, 4)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			body, _ := io.ReadAll(r.Body)
+			replied <- recordedRequest{method: r.Method, path: r.URL.Path, header: r.Header.Clone(), body: string(body)}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":"fake-id"}`)
+			return
+		}
+
+		mu.Lock()
+		first := !delivered
+		delivered = true
+		mu.Unlock()
+		if first {
+			line, _ := json.Marshal(map[string]any{"event": "message", "topic": "inbound-a", "message": message})
+			_, _ = w.Write(append(line, '\n'))
+		}
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+
+	c := New(testConfig(srv.URL), testActionSecret, svc)
+	c.reconnectWait = time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		c.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-runDone:
+		case <-time.After(5 * time.Second):
+			t.Error("Run did not return after ctx cancel")
+		}
+	})
+
+	select {
+	case reply := <-replied:
+		return reply
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for a reply to %q", message)
+		return recordedRequest{}
 	}
 }
 
@@ -1520,4 +1618,278 @@ func TestRun_StubInvocationReachesTheServiceVerbatim(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return after ctx cancel")
 	}
+}
+
+func TestRun_StubCommandDefinesAStub(t *testing.T) {
+	type setCall struct {
+		name string
+		stub reminder.Stub
+	}
+	calls := make(chan setCall, 4)
+
+	svc := &stubReminderService{
+		createFn: func(service.CreateInput) (*reminder.Reminder, error) {
+			t.Error("create was called, want /stub to define a stub rather than create a reminder")
+			return nil, errors.New("unexpected create call")
+		},
+		setStubFn: func(name string, stub reminder.Stub) (bool, error) {
+			calls <- setCall{name: name, stub: stub}
+			return true, nil
+		},
+	}
+
+	reply := deliverInbound(t, svc, "/stub hockey in 15m back to the game #hockey !high")
+
+	select {
+	case got := <-calls:
+		if got.name != "hockey" {
+			t.Errorf("SetStub name = %q, want %q", got.name, "hockey")
+		}
+		want := reminder.Stub{Text: "in 15m back to the game", Tags: []string{"hockey"}, Priority: "high"}
+		if !reflect.DeepEqual(got.stub, want) {
+			t.Errorf("SetStub stub = %+v, want %+v - the trailing directives belong in structured fields, not the text", got.stub, want)
+		}
+	default:
+		t.Fatal("SetStub was never called")
+	}
+
+	if reply.path != "/inbound-a" {
+		t.Errorf("reply path = %q, want /inbound-a (the message's own topic)", reply.path)
+	}
+	if !strings.HasPrefix(reply.body, "[later] ") {
+		t.Errorf("reply body = %q, want the %q prefix so the subscriber skips it", reply.body, "[later] ")
+	}
+	if !strings.Contains(reply.body, "created") {
+		t.Errorf("reply body = %q, want it to say the stub was created", reply.body)
+	}
+	if !strings.Contains(reply.body, "in 15m back to the game") {
+		t.Errorf("reply body = %q, want it to echo the text the stub expands to", reply.body)
+	}
+	if !strings.Contains(reply.body, ":hockey") {
+		t.Errorf("reply body = %q, want it to name the stub as it is invoked", reply.body)
+	}
+}
+
+func TestRun_StubCommandSaysUpdatedWhenReplacing(t *testing.T) {
+	svc := &stubReminderService{
+		setStubFn: func(string, reminder.Stub) (bool, error) { return false, nil },
+	}
+
+	reply := deliverInbound(t, svc, "/stub hockey in 20m back to the game")
+
+	if !strings.Contains(reply.body, "updated") {
+		t.Errorf("reply body = %q, want it to say the stub was updated, not created", reply.body)
+	}
+	if strings.Contains(reply.body, "created") {
+		t.Errorf("reply body = %q, want a replace never to read as a create", reply.body)
+	}
+}
+
+// TestRun_StubConfirmationCarriesNoDueTime pins the reason the
+// confirmation is not a preview: a stub resolves fresh on every use, so
+// a due time computed at definition time would name a moment the stub
+// will never fire at.
+func TestRun_StubConfirmationCarriesNoDueTime(t *testing.T) {
+	svc := &stubReminderService{
+		setStubFn: func(string, reminder.Stub) (bool, error) { return true, nil },
+		previewFn: func(string) (string, time.Time, error) {
+			t.Error("PreviewReminderText was called, want no due time resolved at definition time")
+			return "", time.Time{}, errors.New("unexpected preview call")
+		},
+	}
+
+	reply := deliverInbound(t, svc, "/stub hockey in 15m back to the game")
+
+	for _, unwanted := range []string{"->", time.Now().Format("Mon Jan 2")} {
+		if strings.Contains(reply.body, unwanted) {
+			t.Errorf("reply body = %q, want no due time in it (found %q)", reply.body, unwanted)
+		}
+	}
+}
+
+func TestRun_StubCommandRejectsAMissingBody(t *testing.T) {
+	svc := &stubReminderService{
+		createFn: func(service.CreateInput) (*reminder.Reminder, error) {
+			t.Error("create was called, want a malformed /stub to be an error, not a reminder")
+			return nil, errors.New("unexpected create call")
+		},
+	}
+
+	reply := deliverInbound(t, svc, "/stub hockey")
+
+	if !strings.Contains(reply.body, "error") || !strings.Contains(reply.body, "/stub") {
+		t.Errorf("reply body = %q, want an error naming the command's usage", reply.body)
+	}
+}
+
+func TestRun_StubCommandSurfacesTheServiceError(t *testing.T) {
+	svc := &stubReminderService{
+		setStubFn: func(string, reminder.Stub) (bool, error) {
+			return false, errors.New("invalid input: stub name \"Hockey\" must be lowercase")
+		},
+	}
+
+	reply := deliverInbound(t, svc, "/stub Hockey in 15m back to the game")
+
+	if !strings.Contains(reply.body, "must be lowercase") {
+		t.Errorf("reply body = %q, want the service's own rejection message", reply.body)
+	}
+}
+
+func TestRun_UnstubCommandDeletes(t *testing.T) {
+	deleted := make(chan string, 4)
+	svc := &stubReminderService{
+		deleteStubFn: func(name string) error {
+			deleted <- name
+			return nil
+		},
+	}
+
+	reply := deliverInbound(t, svc, "/unstub hockey")
+
+	select {
+	case name := <-deleted:
+		if name != "hockey" {
+			t.Errorf("DeleteStub name = %q, want %q", name, "hockey")
+		}
+	default:
+		t.Fatal("DeleteStub was never called")
+	}
+
+	if !strings.HasPrefix(reply.body, "[later] ") {
+		t.Errorf("reply body = %q, want the %q prefix", reply.body, "[later] ")
+	}
+	if !strings.Contains(reply.body, "deleted") || !strings.Contains(reply.body, ":hockey") {
+		t.Errorf("reply body = %q, want it to say which stub was deleted", reply.body)
+	}
+}
+
+func TestRun_UnstubCommandReportsAnUnknownName(t *testing.T) {
+	svc := &stubReminderService{
+		deleteStubFn: func(string) error { return fmt.Errorf("stub %q %w", "hokey", service.ErrNotFound) },
+	}
+
+	reply := deliverInbound(t, svc, "/unstub hokey")
+
+	if !strings.Contains(reply.body, "not found") || !strings.Contains(reply.body, "hokey") {
+		t.Errorf("reply body = %q, want a clear error naming the unknown stub", reply.body)
+	}
+}
+
+func TestRun_StubsCommandListsWhatExists(t *testing.T) {
+	svc := &stubReminderService{
+		listStubsFn: func() ([]reminder.NamedStub, error) {
+			return []reminder.NamedStub{
+				{Name: "hockey", Stub: reminder.Stub{Text: "in 15m back to the game", Tags: []string{"hockey"}, Priority: "high"}},
+				{Name: "laundry", Stub: reminder.Stub{Text: "in 45m move the laundry"}},
+			}, nil
+		},
+	}
+
+	reply := deliverInbound(t, svc, "/stubs")
+
+	if !strings.HasPrefix(reply.body, "[later] ") {
+		t.Errorf("reply body = %q, want the %q prefix", reply.body, "[later] ")
+	}
+	for _, want := range []string{":hockey", "in 15m back to the game", "#hockey", "!high", ":laundry", "in 45m move the laundry"} {
+		if !strings.Contains(reply.body, want) {
+			t.Errorf("reply body = %q, want it to contain %q", reply.body, want)
+		}
+	}
+}
+
+func TestRun_StubsCommandOnAnEmptyListSaysSo(t *testing.T) {
+	svc := &stubReminderService{
+		listStubsFn: func() ([]reminder.NamedStub, error) { return nil, nil },
+	}
+
+	reply := deliverInbound(t, svc, "/stubs")
+
+	if !strings.Contains(strings.ToLower(reply.body), "no stubs") {
+		t.Errorf("reply body = %q, want it to say there are no stubs defined", reply.body)
+	}
+}
+
+// TestRun_CommandsAreCaseInsensitive covers the phone keyboard
+// autocapitalizing the first word of a message. Only the verb folds -
+// the stub name is passed through as typed, since writes are explicit
+// about case.
+func TestRun_CommandsAreCaseInsensitive(t *testing.T) {
+	svc := &stubReminderService{
+		listStubsFn: func() ([]reminder.NamedStub, error) { return nil, nil },
+	}
+
+	reply := deliverInbound(t, svc, "/Stubs")
+
+	if !strings.Contains(strings.ToLower(reply.body), "no stubs") {
+		t.Errorf("reply body = %q, want /Stubs handled the same as /stubs", reply.body)
+	}
+}
+
+// TestRun_AnUnknownSlashWordIsStillAReminder pins the table's
+// fall-through: only the verbs in it are commands, and anything else
+// keeps the behaviour it had before there was a table.
+func TestRun_AnUnknownSlashWordIsStillAReminder(t *testing.T) {
+	created := make(chan string, 4)
+	svc := &stubReminderService{
+		createFn: func(in service.CreateInput) (*reminder.Reminder, error) {
+			created <- in.Text
+			return &reminder.Reminder{ID: "rem-1", DueAt: time.Now().Add(time.Hour)}, nil
+		},
+	}
+
+	deliverInbound(t, svc, "/groceries in 2h")
+
+	select {
+	case text := <-created:
+		if text != "/groceries in 2h" {
+			t.Errorf("create received %q, want the message verbatim", text)
+		}
+	default:
+		t.Fatal("create was never called for an unknown slash word")
+	}
+}
+
+func TestRun_StubCommandsAcceptTheInvocationSigil(t *testing.T) {
+	t.Run("stub", func(t *testing.T) {
+		names := make(chan string, 4)
+		svc := &stubReminderService{
+			setStubFn: func(name string, _ reminder.Stub) (bool, error) {
+				names <- name
+				return true, nil
+			},
+		}
+
+		deliverInbound(t, svc, "/stub :hockey in 15m back to the game")
+
+		select {
+		case name := <-names:
+			if name != "hockey" {
+				t.Errorf("SetStub name = %q, want the sigil stripped (%q)", name, "hockey")
+			}
+		default:
+			t.Fatal("SetStub was never called")
+		}
+	})
+
+	t.Run("unstub", func(t *testing.T) {
+		names := make(chan string, 4)
+		svc := &stubReminderService{
+			deleteStubFn: func(name string) error {
+				names <- name
+				return nil
+			},
+		}
+
+		deliverInbound(t, svc, "/unstub :hockey")
+
+		select {
+		case name := <-names:
+			if name != "hockey" {
+				t.Errorf("DeleteStub name = %q, want the sigil stripped (%q)", name, "hockey")
+			}
+		default:
+			t.Fatal("DeleteStub was never called")
+		}
+	})
 }

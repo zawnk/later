@@ -358,7 +358,7 @@ func TestSetStub_CreatesTheFileAndRoundtrips(t *testing.T) {
 		Priority: "high",
 		Click:    "https://example.com/game",
 	}
-	if err := s.SetStub("hockey", stub); err != nil {
+	if _, err := s.SetStub("hockey", stub); err != nil {
 		t.Fatalf("SetStub() error = %v", err)
 	}
 
@@ -382,10 +382,10 @@ func TestSetStub_ReplacesAnExistingDefinition(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	if err := s.SetStub("hockey", reminder.Stub{Text: "in 15m back to the game", Tags: []string{"hockey"}}); err != nil {
+	if _, err := s.SetStub("hockey", reminder.Stub{Text: "in 15m back to the game", Tags: []string{"hockey"}}); err != nil {
 		t.Fatalf("SetStub() error = %v", err)
 	}
-	if err := s.SetStub("hockey", reminder.Stub{Text: "in 20m back to the game"}); err != nil {
+	if _, err := s.SetStub("hockey", reminder.Stub{Text: "in 20m back to the game"}); err != nil {
 		t.Fatalf("SetStub() (replacing) error = %v", err)
 	}
 
@@ -407,10 +407,10 @@ func TestDeleteStub(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	if err := s.SetStub("hockey", reminder.Stub{Text: "in 15m back to the game"}); err != nil {
+	if _, err := s.SetStub("hockey", reminder.Stub{Text: "in 15m back to the game"}); err != nil {
 		t.Fatalf("SetStub() error = %v", err)
 	}
-	if err := s.SetStub("laundry", reminder.Stub{Text: "in 45m move the laundry"}); err != nil {
+	if _, err := s.SetStub("laundry", reminder.Stub{Text: "in 45m move the laundry"}); err != nil {
 		t.Fatalf("SetStub() error = %v", err)
 	}
 
@@ -460,7 +460,7 @@ func TestSetStub_ConcurrentWritesToDifferentNames(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errs[i] = s.SetStub(fmt.Sprintf("stub%d", i), reminder.Stub{Text: fmt.Sprintf("in %dm do a thing", i+1)})
+			_, errs[i] = s.SetStub(fmt.Sprintf("stub%d", i), reminder.Stub{Text: fmt.Sprintf("in %dm do a thing", i+1)})
 		}()
 	}
 	wg.Wait()
@@ -483,5 +483,31 @@ func TestSetStub_ConcurrentWritesToDifferentNames(t *testing.T) {
 		if want := fmt.Sprintf("in %dm do a thing", i+1); stubs[name].Text != want {
 			t.Errorf("%s text = %q, want %q", name, stubs[name].Text, want)
 		}
+	}
+}
+
+// TestSetStub_ReportsWhetherItCreated pins the distinction the ntfy
+// "/stub" confirmation needs: a write under a fresh name created, a
+// write over an existing one replaced.
+func TestSetStub_ReportsWhetherItCreated(t *testing.T) {
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	created, err := s.SetStub("hockey", reminder.Stub{Text: "in 15m back to the game"})
+	if err != nil {
+		t.Fatalf("SetStub() error = %v", err)
+	}
+	if !created {
+		t.Error("SetStub() created = false for a name not yet defined, want true")
+	}
+
+	created, err = s.SetStub("hockey", reminder.Stub{Text: "in 20m back to the game"})
+	if err != nil {
+		t.Fatalf("SetStub() (replacing) error = %v", err)
+	}
+	if created {
+		t.Error("SetStub() created = true when replacing an existing definition, want false")
 	}
 }
