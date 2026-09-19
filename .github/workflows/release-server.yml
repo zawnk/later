@@ -53,6 +53,24 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0 # full tag history, for the previous-tag lookup below
+
+      - name: Release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREFIX: later-server
+        run: |
+          # generate_release_notes picks the chronologically previous tag in the
+          # repo. Pin the base to this component's own previous tag instead.
+          prev=$(git tag --list "$PREFIX/v*" --sort=-v:refname \
+                   | grep -vxF "$GITHUB_REF_NAME" | head -1)
+          gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+            -f tag_name="$GITHUB_REF_NAME" \
+            ${prev:+-f previous_tag_name="$prev"} \
+            -q .body > "$RUNNER_TEMP/notes.md"
+
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: later-server_linux_*
@@ -66,7 +84,7 @@ jobs:
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           name: "later-server ${{ needs.build-binaries.outputs.version }}"
-          generate_release_notes: true
+          body_path: ${{ runner.temp }}/notes.md
           files: dist/*
 
   docker:
