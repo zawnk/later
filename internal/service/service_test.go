@@ -1472,3 +1472,108 @@ func TestCreateReminder_PlainReminderIgnoresABrokenStubsFile(t *testing.T) {
 		t.Errorf("CreateReminder() error = %v, want an internal error, not one blamed on the caller's input", err)
 	}
 }
+
+// TestPreviewReminderText covers the preview entry point every /test
+// surface calls: it resolves a stub invocation first, so a preview
+// reports what the stub would actually schedule rather than echoing the
+// unexpanded ":hockey".
+func TestPreviewReminderText(t *testing.T) {
+	stubs := map[string]reminder.Stub{
+		"hockey": {
+			Text:     "in 15m back to the game",
+			Tags:     []string{"hockey"},
+			Priority: "high",
+		},
+	}
+
+	tests := []struct {
+		name     string
+		text     string
+		wantTask string
+		wantDue  time.Time
+	}{
+		{"bare stub name previews the expansion", ":hockey", "back to the game", stubNow.Add(15 * time.Minute)},
+		{"capitalized stub name folds", ":HOCKEY", "back to the game", stubNow.Add(15 * time.Minute)},
+		{"trailing text appends raw and the stub's time wins", ":hockey overtime", "back to the game overtime", stubNow.Add(15 * time.Minute)},
+		{"closed shortcode stays literal", ":warning: take out the trash in 2h", ":warning: take out the trash", stubNow.Add(2 * time.Hour)},
+		{"digit-initial stays literal", ":30 past the hour in 2h", ":30 past the hour", stubNow.Add(2 * time.Hour)},
+		{"plain text is unaffected", "buy milk in 3d", "buy milk", stubNow.AddDate(0, 0, 3)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &mockStore{stubs: stubs}
+			svc := newStubService(store)
+
+			task, due, err := svc.PreviewReminderText(tt.text)
+			if err != nil {
+				t.Fatalf("PreviewReminderText(%q) error = %v", tt.text, err)
+			}
+			if task != tt.wantTask {
+				t.Errorf("PreviewReminderText(%q) task = %q, want %q", tt.text, task, tt.wantTask)
+			}
+			if !due.Equal(tt.wantDue) {
+				t.Errorf("PreviewReminderText(%q) due = %v, want %v", tt.text, due, tt.wantDue)
+			}
+			if len(store.saved) != 0 {
+				t.Errorf("PreviewReminderText(%q) saved %d reminders, want 0 (preview must not persist)", tt.text, len(store.saved))
+			}
+		})
+	}
+}
+
+func TestPreviewReminderText_UnknownStubFailsTheWayACreateWould(t *testing.T) {
+	svc := newStubService(&mockStore{stubs: map[string]reminder.Stub{
+		"hockey": {Text: "in 15m back to the game"},
+	}})
+
+	_, _, previewErr := svc.PreviewReminderText(":hokey")
+	if previewErr == nil {
+		t.Fatal("PreviewReminderText(\":hokey\") error = nil, want an unknown-stub error")
+	}
+	if !errors.Is(previewErr, ErrInvalidInput) {
+		t.Errorf("PreviewReminderText() error = %v, want it to wrap ErrInvalidInput", previewErr)
+	}
+
+	_, createErr := svc.CreateReminder(CreateInput{Text: ":hokey"})
+	if createErr == nil {
+		t.Fatal("CreateReminder(\":hokey\") error = nil, want an unknown-stub error")
+	}
+	if previewErr.Error() != createErr.Error() {
+		t.Errorf("PreviewReminderText() error = %q, want the same error a create reports: %q", previewErr, createErr)
+	}
+}
+
+// TestPreviewReminderText_RejectsOptionsTheStubItselfCarries covers the
+// one create-time rejection a preview can reach: preview takes text
+// only, so the options under validation are always the stub's own, and
+// a hand-edited stub is exactly what a preview gets used to check.
+func TestPreviewReminderText_RejectsOptionsTheStubItselfCarries(t *testing.T) {
+	tests := []struct {
+		name        string
+		stub        reminder.Stub
+		wantErrText string
+	}{
+		{"bad priority", reminder.Stub{Text: "in 15m back to the game", Priority: "highh"}, "invalid priority"},
+		{"relative click url", reminder.Stub{Text: "in 15m back to the game", Click: "/game"}, "click must be an absolute URL"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := newStubService(&mockStore{stubs: map[string]reminder.Stub{"hockey": tt.stub}})
+
+			_, _, previewErr := svc.PreviewReminderText(":hockey")
+			if previewErr == nil {
+				t.Fatalf("PreviewReminderText(\":hockey\") error = nil, want %q", tt.wantErrText)
+			}
+			if !errors.Is(previewErr, ErrInvalidInput) || !strings.Contains(previewErr.Error(), tt.wantErrText) {
+				t.Errorf("PreviewReminderText() error = %v, want an ErrInvalidInput containing %q", previewErr, tt.wantErrText)
+			}
+
+			_, createErr := svc.CreateReminder(CreateInput{Text: ":hockey"})
+			if createErr == nil || previewErr.Error() != createErr.Error() {
+				t.Errorf("PreviewReminderText() error = %q, want the same error a create reports: %v", previewErr, createErr)
+			}
+		})
+	}
+}

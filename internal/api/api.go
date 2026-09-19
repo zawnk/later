@@ -361,8 +361,9 @@ func (a *API) dismissReminder(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// testParse previews how text would be parsed by CreateReminder - task
-// text and resolved due time - without creating or storing anything.
+// testParse previews what CreateReminder would schedule for text - task
+// text and resolved due time, with any stub invocation expanded first -
+// without creating or storing anything.
 func (a *API) testParse(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Text string `json:"text"`
@@ -376,7 +377,7 @@ func (a *API) testParse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, due, err := a.svc.ParseReminderText(body.Text)
+	task, due, err := a.svc.PreviewReminderText(body.Text)
 	if err != nil {
 		writeServiceError(w, err, "failed to parse")
 		return

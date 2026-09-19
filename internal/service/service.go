@@ -154,9 +154,10 @@ func New(s Store) *Service {
 }
 
 // ParseReminderText runs text through the exact same task/due-time extraction
-// CreateReminder uses, without generating an ID or saving anything -
-// backs the /test/parse "show what would be scheduled" preview (CLI, API,
-// and the ntfy inbound "/test <text>" trigger). Returns the same
+// CreateReminder uses, without generating an ID or saving anything - the
+// parsing half of both creation and the "show what would be scheduled"
+// preview (which reaches it through PreviewReminderText, one stub
+// resolution earlier). Returns the same
 // ErrInvalidInput-wrapped errors CreateReminder would, since it's the same
 // code, so a preview failure is always a real reason a real create would
 // also fail - though not necessarily the first one reported: CreateReminder
@@ -191,6 +192,32 @@ func (s *Service) ParseReminderText(text string) (task string, due time.Time, er
 	}
 
 	return task, dueAt, nil
+}
+
+// PreviewReminderText backs the /test/parse "show what would be
+// scheduled" preview on all three surfaces (CLI, API, and the ntfy
+// inbound "/test <text>" trigger): it runs CreateReminder's stub
+// resolution and then its text parsing, so previewing ":hockey" reports
+// the task text and due time that stub would actually produce rather
+// than echoing the unexpanded invocation, and an unknown stub-shaped
+// name fails with the same unknown-stub error a create would report.
+//
+// It runs CreateReminder's first three steps in that pipeline's own
+// order, option validation included: preview is handed text and nothing
+// else, so the only options it can ever validate are the ones the
+// resolved stub carries - and a hand-edited stub is exactly what
+// someone reaches for a preview to check. A stub carrying a bad
+// priority therefore fails the same way here as it would at create
+// time, rather than previewing clean and failing on the real thing.
+func (s *Service) PreviewReminderText(text string) (task string, due time.Time, err error) {
+	in, err := s.resolveStub(CreateInput{Text: text})
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	if err := validateNotificationOptions(in); err != nil {
+		return "", time.Time{}, err
+	}
+	return s.ParseReminderText(in.Text)
 }
 
 // CreateReminder runs creation as an explicit, ordered sequence of named

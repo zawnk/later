@@ -32,7 +32,7 @@ const ageLineThreshold = time.Hour
 // inbound ntfy messages.
 type ReminderService interface {
 	CreateReminder(service.CreateInput) (*reminder.Reminder, error)
-	ParseReminderText(text string) (task string, due time.Time, err error)
+	PreviewReminderText(text string) (task string, due time.Time, err error)
 }
 
 type subscriptionMessage struct {
@@ -397,8 +397,10 @@ func cutTestPrefix(text string) (rest string, ok bool) {
 // handleTestParse previews rest the same way a real create would - through
 // parseDirectives first, so a "/test buy milk tomorrow #work" preview
 // never shows a tag stuck in the task text a real send would have
-// stripped - then replies with task+due only (stripped tags/priority
-// aren't echoed back; this is a preview of the *time* parsing).
+// stripped, then through PreviewReminderText, so "/test :hockey" shows
+// what the stub would schedule rather than the invocation itself - then
+// replies with task+due only (stripped tags/priority aren't echoed back;
+// this is a preview of the *time* parsing).
 func (c *Client) handleTestParse(ctx context.Context, inbound, rest string) {
 	text, _, _, err := parseDirectives(rest)
 	if err != nil {
@@ -409,7 +411,7 @@ func (c *Client) handleTestParse(ctx context.Context, inbound, rest string) {
 		return
 	}
 
-	task, due, err := c.svc.ParseReminderText(text)
+	task, due, err := c.svc.PreviewReminderText(text)
 	if err != nil {
 		slog.Error("failed to preview parse from ntfy", "err", err)
 		if sendErr := c.sendError(ctx, inbound, err); sendErr != nil {

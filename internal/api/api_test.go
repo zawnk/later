@@ -842,6 +842,79 @@ func TestTestParse(t *testing.T) {
 			t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
 		}
 	})
+
+	t.Run("a stub invocation previews the reminder the stub would create", func(t *testing.T) {
+		store := &stubStore{stubDefs: map[string]reminder.Stub{
+			"hockey": {Text: "in 15m back to the game", Tags: []string{"hockey"}, Priority: "high"},
+		}}
+		a := New(cfg, service.New(store), testActionSecret, nil)
+
+		req := httptest.NewRequest(http.MethodPost, "/test/parse", postBody(":hockey"))
+		req.Header.Set("Authorization", "Bearer valid-token")
+		rr := httptest.NewRecorder()
+		a.Routes().ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d (body: %s)", rr.Code, http.StatusOK, rr.Body.String())
+		}
+
+		var got struct {
+			Text  string    `json:"text"`
+			DueAt time.Time `json:"due_at"`
+		}
+		if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+			t.Fatalf("decoding response: %v", err)
+		}
+		if got.Text != "back to the game" {
+			t.Errorf("Text = %q, want the stub's expanded task text %q", got.Text, "back to the game")
+		}
+		if !got.DueAt.After(time.Now()) {
+			t.Errorf("DueAt = %v, want the stub's own \"in 15m\" resolved into the future", got.DueAt)
+		}
+		if len(store.saved) != 0 {
+			t.Errorf("store saved %d reminders, want 0 (preview must not persist)", len(store.saved))
+		}
+	})
+
+	t.Run("an unknown stub is a 400 naming the stub", func(t *testing.T) {
+		a := New(cfg, service.New(&stubStore{stubDefs: map[string]reminder.Stub{
+			"hockey": {Text: "in 15m back to the game"},
+		}}), testActionSecret, nil)
+
+		req := httptest.NewRequest(http.MethodPost, "/test/parse", postBody(":hokey"))
+		req.Header.Set("Authorization", "Bearer valid-token")
+		rr := httptest.NewRecorder()
+		a.Routes().ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d (body: %s)", rr.Code, http.StatusBadRequest, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), "unknown stub") || !strings.Contains(rr.Body.String(), ":hokey") {
+			t.Errorf("body = %q, want the unknown-stub error a create would report", rr.Body.String())
+		}
+	})
+
+	t.Run("literal colon-initial text is previewed as ordinary text", func(t *testing.T) {
+		a := New(cfg, service.New(&stubStore{}), testActionSecret, nil)
+
+		req := httptest.NewRequest(http.MethodPost, "/test/parse", postBody(":warning: take out the trash in 2h"))
+		req.Header.Set("Authorization", "Bearer valid-token")
+		rr := httptest.NewRecorder()
+		a.Routes().ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d (body: %s)", rr.Code, http.StatusOK, rr.Body.String())
+		}
+		var got struct {
+			Text string `json:"text"`
+		}
+		if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+			t.Fatalf("decoding response: %v", err)
+		}
+		if got.Text != ":warning: take out the trash" {
+			t.Errorf("Text = %q, want the literal text left alone", got.Text)
+		}
+	})
 }
 
 func TestGetReminder(t *testing.T) {

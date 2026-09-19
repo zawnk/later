@@ -34,9 +34,9 @@ func (s *stubReminderService) CreateReminder(in service.CreateInput) (*reminder.
 	return s.createFn(in)
 }
 
-func (s *stubReminderService) ParseReminderText(text string) (string, time.Time, error) {
+func (s *stubReminderService) PreviewReminderText(text string) (string, time.Time, error) {
 	if s.previewFn == nil {
-		return "", time.Time{}, errors.New("ParseReminderText not expected in this test")
+		return "", time.Time{}, errors.New("PreviewReminderText not expected in this test")
 	}
 	return s.previewFn(text)
 }
@@ -929,6 +929,74 @@ func TestRun_TestParseRepliesWithPreview(t *testing.T) {
 		}
 		if !strings.Contains(reply.body, "buy milk") {
 			t.Errorf("reply body = %q, want it to contain the previewed task text", reply.body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the preview reply")
+	}
+
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
+func TestRun_TestParsePreviewsAStubInvocation(t *testing.T) {
+	var (
+		mu        sync.Mutex
+		delivered bool
+	)
+	replied := make(chan recordedRequest, 4)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			body, _ := io.ReadAll(r.Body)
+			replied <- recordedRequest{method: r.Method, path: r.URL.Path, header: r.Header.Clone(), body: string(body)}
+			return
+		}
+
+		mu.Lock()
+		first := !delivered
+		delivered = true
+		mu.Unlock()
+		if first {
+			_, _ = io.WriteString(w, `{"event":"message","topic":"inbound-a","message":"/test :hockey"}`+"\n")
+		}
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+
+	create := func(in service.CreateInput) (*reminder.Reminder, error) {
+		t.Error("create was called, want the /test trigger to bypass reminder creation entirely")
+		return nil, errors.New("unexpected create call")
+	}
+	preview := func(text string) (string, time.Time, error) {
+		if text != ":hockey" {
+			t.Errorf("preview received %q, want the invocation handed over unexpanded (\":hockey\")", text)
+		}
+		return "back to the game", time.Date(2026, 6, 15, 9, 15, 0, 0, time.UTC), nil
+	}
+
+	c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{createFn: create, previewFn: preview})
+	c.reconnectWait = time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		c.Run(ctx)
+	}()
+
+	select {
+	case reply := <-replied:
+		if !strings.Contains(reply.body, "back to the game") {
+			t.Errorf("reply body = %q, want the stub's expanded task text, not the raw invocation", reply.body)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for the preview reply")
