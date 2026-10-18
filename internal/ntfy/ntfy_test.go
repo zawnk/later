@@ -826,7 +826,7 @@ func TestSubscribe(t *testing.T) {
 	c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
 
 	msgs := make(chan subscriptionMessage, 16)
-	if _, err := c.subscribe(context.Background(), "inbound-a,inbound-b", "", msgs); err != nil {
+	if _, err := c.subscribe(context.Background(), "inbound-a,inbound-b", "", newSeenMessages(), msgs); err != nil {
 		t.Fatalf("subscribe() error = %v", err)
 	}
 	close(msgs)
@@ -871,7 +871,7 @@ func TestSubscribe_ServerError(t *testing.T) {
 	c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{})
 	msgs := make(chan subscriptionMessage, 1)
 
-	_, err := c.subscribe(context.Background(), "inbound-a", "", msgs)
+	_, err := c.subscribe(context.Background(), "inbound-a", "", newSeenMessages(), msgs)
 	if err == nil {
 		t.Fatal("subscribe() error = nil, want an error for a 401 response")
 	}
@@ -1516,6 +1516,102 @@ func TestRun_ResubscribesWithSince(t *testing.T) {
 	}
 	if sinceParams[1] != "msg-1" {
 		t.Errorf("second connection since = %q, want %q (resume from the last seen message ID)", sinceParams[1], "msg-1")
+	}
+}
+
+func TestRun_SkipsMessagesReplayedOnReconnect(t *testing.T) {
+	var mu sync.Mutex
+	connections := 0
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			return
+		}
+		mu.Lock()
+		connections++
+		n := connections
+		mu.Unlock()
+
+		if n == 1 {
+			_, _ = io.WriteString(w, `{"id":"msg-1","time":1760000000,"event":"message","topic":"inbound-a","message":"hi"}`+"\n")
+			return
+		}
+
+		// ntfy v2.31+ answers since=msg-1 with every message published in
+		// msg-1's second, msg-1 itself included.
+		_, _ = io.WriteString(w, `{"id":"msg-1","time":1760000000,"event":"message","topic":"inbound-a","message":"hi"}`+"\n")
+		_, _ = io.WriteString(w, `{"id":"msg-2","time":1760000000,"event":"message","topic":"inbound-a","message":"there"}`+"\n")
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+
+	created := make(chan createCall, 64)
+	create := func(in service.CreateInput) (*reminder.Reminder, error) {
+		created <- createCall{text: in.Text, outbound: in.OutboundTopics, tags: in.Tags, priority: in.Priority}
+		return &reminder.Reminder{ID: "rem-1"}, nil
+	}
+	c := New(testConfig(srv.URL), testActionSecret, &stubReminderService{createFn: create})
+	c.reconnectWait = time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		c.Run(ctx)
+	}()
+
+	var texts []string
+	for i := range 2 {
+		select {
+		case call := <-created:
+			texts = append(texts, call.text)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for create %d", i)
+		}
+	}
+	if !slices.Equal(texts, []string{"hi", "there"}) {
+		t.Errorf("created texts = %v, want [hi there] -- the replayed msg-1 must not create a second reminder", texts)
+	}
+
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+
+	if len(created) != 0 {
+		t.Errorf("%d extra reminders created after the reconnect, want none", len(created))
+	}
+}
+
+func TestSeenMessages(t *testing.T) {
+	s := newSeenMessages()
+
+	if !s.add("msg-1", 1000) {
+		t.Error("add(msg-1) = false on first sight, want true")
+	}
+	if s.add("msg-1", 1000) {
+		t.Error("add(msg-1) = true on second sight, want false")
+	}
+	if !s.add("msg-2", 1000+seenWindow) {
+		t.Error("add(msg-2) = false on first sight, want true")
+	}
+	if s.add("msg-1", 1000) {
+		t.Error("add(msg-1) = true while still inside the window, want false")
+	}
+
+	s.add("msg-3", 1001+seenWindow)
+	if _, ok := s.published["msg-1"]; ok {
+		t.Error("msg-1 still remembered once older than the window, want it forgotten")
+	}
+	if _, ok := s.published["msg-2"]; !ok {
+		t.Error("msg-2 forgotten while inside the window, want it remembered")
 	}
 }
 
