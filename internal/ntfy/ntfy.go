@@ -53,6 +53,42 @@ type ntfyMessage struct {
 	Message string `json:"message"`
 }
 
+// seenWindow is how long, in seconds of publish time, a received message
+// ID is remembered. A since=<id> reconnect replays the messages published
+// in the same second as <id>, so anything well past that is safe to
+// forget; the margin covers clock skew between ntfy servers.
+const seenWindow int64 = 60
+
+// seenMessages remembers the IDs of recently received inbound messages so
+// a since=<id> reconnect does not act on the same message twice. It lives
+// across reconnects but not restarts: a fresh process subscribes without
+// since=, so ntfy replays nothing.
+type seenMessages struct {
+	published map[string]int64
+	newest    int64
+}
+
+func newSeenMessages() *seenMessages {
+	return &seenMessages{published: make(map[string]int64)}
+}
+
+// add records id with its publish time and reports whether it is new.
+func (s *seenMessages) add(id string, published int64) bool {
+	if _, ok := s.published[id]; ok {
+		return false
+	}
+	s.published[id] = published
+	if published > s.newest {
+		s.newest = published
+		for seenID, t := range s.published {
+			if t < s.newest-seenWindow {
+				delete(s.published, seenID)
+			}
+		}
+	}
+	return true
+}
+
 type ntfyMessageModifications struct {
 	title    string
 	late     bool
@@ -326,10 +362,11 @@ func (c *Client) Run(ctx context.Context) {
 	}
 	combined := strings.Join(topics, ",")
 	var since string
+	seen := newSeenMessages()
 
 	for {
 		slog.Info("subscribing to ntfy topics", "topics", combined, "since", since)
-		newSince, err := c.subscribe(ctx, combined, since, msgs)
+		newSince, err := c.subscribe(ctx, combined, since, seen, msgs)
 		since = newSince
 
 		if ctx.Err() != nil {
@@ -581,7 +618,7 @@ func (c *Client) handleTestParse(ctx context.Context, inbound, rest string) {
 	}
 }
 
-func (c *Client) subscribe(ctx context.Context, topics, since string, incomingMsgs chan<- subscriptionMessage) (string, error) {
+func (c *Client) subscribe(ctx context.Context, topics, since string, seen *seenMessages, incomingMsgs chan<- subscriptionMessage) (string, error) {
 	url := fmt.Sprintf("%s/%s/json", strings.TrimRight(c.cfg.Ntfy.Server, "/"), topics)
 	if since != "" {
 		url += "?since=" + since
@@ -627,6 +664,11 @@ func (c *Client) subscribe(ctx context.Context, topics, since string, incomingMs
 		}
 
 		if msg.Event != "message" {
+			continue
+		}
+
+		if msg.ID != "" && !seen.add(msg.ID, msg.Time) {
+			slog.Info("skipping already received ntfy message", "topic", msg.Topic, "id", msg.ID)
 			continue
 		}
 
