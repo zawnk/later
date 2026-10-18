@@ -1,6 +1,6 @@
 services:
   later:
-    image: ghcr.io/zawnk/later-server:0.3.0@sha256:0d50586aa743c9969ceb37ac41b99bc7fc1f5d5bdaa2efceca76c4bccbd9b5f8
+    image: ghcr.io/zawnk/later-server:0.3.1@sha256:e72e286fb434f67f39d6fe0da423324f34f328931a7208e1b1c737d41ad51e6b
     # build: .   # uncomment (and comment out `image:` above) for a local/dev build instead of the published image
     container_name: later
     restart: unless-stopped
